@@ -153,6 +153,13 @@ class OracleEngine:
                     result = self._build_response(query, table_chunks, table_chunks, table_answer, table_chunks[0].get("source", "unknown"), 0.75, "[Supported]", self.available_sections)
                     self._cached_ask[cache_key] = result
                     return result
+            all_table_like = self._find_all_table_lines()
+            if all_table_like:
+                table_answer = self._extract_by_intent(intent, query, all_table_like, analysis)
+                if table_answer:
+                    result = self._build_response(query, all_table_like, all_table_like, table_answer, "documento", 0.65, "[Supported]", self.available_sections)
+                    self._cached_ask[cache_key] = result
+                    return result
 
         hyde_query = self.hyde.generate(query)
         bm25_results = self.bm25.search(search_query, self.config.bm25_top_k)
@@ -211,6 +218,39 @@ class OracleEngine:
         result = self._build_response(query, [], [], msg, "", 0, "[No Support]", sections)
         self._cached_ask[cache_key] = result
         return result
+
+    def _find_all_table_lines(self) -> List[Tuple]:
+        results = []
+        seen_texts = set()
+        for i, c in enumerate(self.dense.chunks):
+            chunk_text = c.get("text", "")
+            chunk_source = c.get("source", "unknown")
+            section = c.get("section", "")
+            if section in ("produtos", "itens", "servicos", "lista", "tabela"):
+                uid = chunk_text[:100]
+                if uid not in seen_texts:
+                    seen_texts.add(uid)
+                    lines = [l.strip() for l in chunk_text.split("\n") if l.strip()]
+                    product_lines = [l for l in lines if re.search(r'\d+', l) and
+                                     not re.match(r'^(?:nota|fiscal|cnpj|inscricao|total|base|calculo)', l, re.IGNORECASE)]
+                    if product_lines:
+                        combined = "\n".join(product_lines)
+                        uid2 = combined[:100]
+                        if uid2 not in seen_texts:
+                            seen_texts.add(uid2)
+                            results.append((len(results), 1.0, combined, chunk_source))
+            if "  " in chunk_text and re.search(r'\d+', chunk_text):
+                lines = [l.strip() for l in chunk_text.split("\n") if l.strip()]
+                data_lines = [l for l in lines if re.search(r'\d+', l) and
+                              not re.match(r'^(?:nota|fiscal|cnpj|inscricao|total)', l, re.IGNORECASE) and
+                              sum(1 for w in l.split() if re.match(r'[\d,R\$\.]+', w)) >= 1]
+                if len(data_lines) >= 2:
+                    combined = "\n".join(data_lines)
+                    uid3 = combined[:100]
+                    if uid3 not in seen_texts:
+                        seen_texts.add(uid3)
+                        results.append((len(results), 0.9, combined, chunk_source))
+        return results
 
     def _find_table_chunks(self) -> List[Tuple]:
         results = []
@@ -348,12 +388,14 @@ class OracleEngine:
         product_name = self._get_query_product(query.lower())
         seen = set()
         products = []
+
         for _, _, text, _ in chunks:
-            for line in text.split("\n"):
+            lines = text.split("\n")
+            for line in lines:
                 line = line.strip()
                 if not line or len(line) < 5:
                     continue
-                if re.match(r'^(?:nota|fiscal|cnpj|inscricao|destinatario|emitente|produtos)', line, re.IGNORECASE):
+                if re.match(r'^(?:nota|fiscal|cnpj|inscricao|destinatario|emitente|produtos?|descricao)', line, re.IGNORECASE):
                     continue
                 if not re.search(r'\d+', line):
                     continue
@@ -366,6 +408,8 @@ class OracleEngine:
                 formatted = self._format_product_line(line)
                 if formatted:
                     products.append(formatted)
+                else:
+                    products.append(line)
 
         if products:
             return "\n".join(products[:20])
@@ -375,7 +419,7 @@ class OracleEngine:
         seen2 = set()
         items = []
         for line in raw_lines:
-            if re.match(r'^[A-Z\s]{5,}$', line):
+            if re.match(r'^(?:nota|fiscal|cnpj|inscricao|destinatario|emitente|produtos?|descricao)', line, re.IGNORECASE):
                 continue
             if re.search(r'\d+', line):
                 if product_name and product_name not in line.lower():

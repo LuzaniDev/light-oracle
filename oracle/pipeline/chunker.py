@@ -1,32 +1,51 @@
 import re
 from typing import List, Dict, Optional
 
-SECTION_MARKERS = [
-    "produtos?", "servicos?", "itens?", "materiais?",
-    "destinatario", "emitente", "remetente", "transportador(?:a|es)?",
-    "nota\s*fiscal", "nf(?:e)?", "danfe",
-    "dados\s*do\s*cliente", "identificacao",
-    "fatura", "boleto", "cobranca",
-    "observacoes?", "informacoes?\s*complementares?",
-    "c\xe1lculo\s*do\s*imposto", "imposto",
-    "icms", "pis", "cofins", "ipi",
-    "total\s*da\s*nota", "resumo",
-    "cst", "ncm", "cfop",
-    "endereco", "entrega",
-    "pedido", "orcamento", "contrato",
-    "pagamento", "condicoes?\s*de\s*pagamento",
-    "garantia", "validade",
-    "lote", "data\s*(?:de\s*)?(?:fabricacao|validade|producao)",
-    "estoque", "almoxarifado",
-    "tabela", "lista",
+SECTION_RULES = [
+    (re.compile(r'produtos?', re.IGNORECASE), "produtos"),
+    (re.compile(r'servicos?', re.IGNORECASE), "servicos"),
+    (re.compile(r'itens?', re.IGNORECASE), "itens"),
+    (re.compile(r'materiais?', re.IGNORECASE), "materiais"),
+    (re.compile(r'destinatario', re.IGNORECASE), "destinatario"),
+    (re.compile(r'emitente', re.IGNORECASE), "emitente"),
+    (re.compile(r'remetente', re.IGNORECASE), "remetente"),
+    (re.compile(r'transportador(?:a|es)?', re.IGNORECASE), "transportadora"),
+    (re.compile(r'nota\s*fiscal', re.IGNORECASE), "cabecalho"),
+    (re.compile(r'nf(?:e)?$', re.IGNORECASE), "cabecalho"),
+    (re.compile(r'danfe', re.IGNORECASE), "cabecalho"),
+    (re.compile(r'dados\s*do\s*cliente', re.IGNORECASE), "cabecalho"),
+    (re.compile(r'identificacao', re.IGNORECASE), "cabecalho"),
+    (re.compile(r'fatura', re.IGNORECASE), "fatura"),
+    (re.compile(r'boleto', re.IGNORECASE), "boleto"),
+    (re.compile(r'observacoes?', re.IGNORECASE), "observacoes"),
+    (re.compile(r'informacoes?\s*complementares?', re.IGNORECASE), "complementos"),
+    (re.compile(r'imposto', re.IGNORECASE), "imposto"),
+    (re.compile(r'icms', re.IGNORECASE), "icms"),
+    (re.compile(r'pis', re.IGNORECASE), "pis"),
+    (re.compile(r'cofins', re.IGNORECASE), "cofins"),
+    (re.compile(r'ipi', re.IGNORECASE), "ipi"),
+    (re.compile(r'total\s*da\s*nota', re.IGNORECASE), "total_nf"),
+    (re.compile(r'resumo', re.IGNORECASE), "resumo"),
+    (re.compile(r'cst', re.IGNORECASE), "cst"),
+    (re.compile(r'ncm', re.IGNORECASE), "ncm"),
+    (re.compile(r'cfop', re.IGNORECASE), "cfop"),
+    (re.compile(r'endereco', re.IGNORECASE), "endereco"),
+    (re.compile(r'entrega', re.IGNORECASE), "entrega"),
+    (re.compile(r'pedido', re.IGNORECASE), "pedido"),
+    (re.compile(r'orcamento', re.IGNORECASE), "orcamento"),
+    (re.compile(r'contrato', re.IGNORECASE), "contrato"),
+    (re.compile(r'pagamento', re.IGNORECASE), "pagamento"),
+    (re.compile(r'condicoes?\s*de\s*pagamento', re.IGNORECASE), "condicoes_pagamento"),
+    (re.compile(r'garantia', re.IGNORECASE), "garantia"),
+    (re.compile(r'validade', re.IGNORECASE), "validade"),
+    (re.compile(r'lote', re.IGNORECASE), "lote"),
+    (re.compile(r'data\s*(?:de\s*)?(?:fabricacao|validade|producao)', re.IGNORECASE), "data"),
+    (re.compile(r'estoque', re.IGNORECASE), "estoque"),
+    (re.compile(r'almoxarifado', re.IGNORECASE), "almoxarifado"),
+    (re.compile(r'tabela', re.IGNORECASE), "tabela"),
+    (re.compile(r'lista', re.IGNORECASE), "lista"),
+    (re.compile(r'endereco', re.IGNORECASE), "endereco"),
 ]
-
-SECTION_NAMES = {
-    "produtos": "produtos", "servicos": "servicos", "itens": "itens",
-    "destinatario": "destinatario", "emitente": "emitente",
-    "nota fiscal": "cabecalho", "nfe": "cabecalho",
-    "identificacao": "cabecalho",
-}
 
 
 class Chunker:
@@ -54,22 +73,20 @@ class Chunker:
         sections = []
         current_name = "geral"
         current_lines = []
-        section_patterns = {m.lower(): re.compile(m, re.IGNORECASE) for m in SECTION_MARKERS}
 
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 continue
-            lower = stripped.lower()
-            matched = None
-            for name, pattern in section_patterns.items():
+            matched_name = None
+            for pattern, name in SECTION_RULES:
                 if pattern.search(stripped):
-                    matched = name
+                    matched_name = name
                     break
-            if matched:
+            if matched_name:
                 if current_lines:
                     sections.append((current_name, "\n".join(current_lines)))
-                current_name = SECTION_NAMES.get(matched, matched)
+                current_name = matched_name
                 current_lines = [stripped]
             else:
                 current_lines.append(stripped)
