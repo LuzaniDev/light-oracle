@@ -266,13 +266,21 @@ class OracleEngine:
             return best_para[:500]
         return ""
 
+    STOP_WORDS = {"qual", "quanto", "quais", "como", "onde", "quando", "quem", "porque",
+                   "valor", "preco", "total", "custa", "custou", "sao", "dos", "das", "do",
+                   "da", "para", "com", "tem", "uma", "uma", "numa", "pelo", "pela",
+                   "entre", "sobre", "apos", "ate", "sem", "sob", "tipo", "forma",
+                   "lista", "liste", "mostre", "diga", "fale", "conte", "informe",
+                   "nota", "fiscal", "documento", "arquivo", "tabela", "numero"}
+
     def _analyze_query(self, query: str) -> Dict:
         query_lower = query.lower()
         intent = "general"
         entities = []
+        product_name = ""
 
         list_words = ["lista", "liste", "listar", "quais", "quais sao", "enumere", "mostre",
-                      "itens", "produtos", "relacao", "todos"]
+                      "itens", "produtos", "relacao", "todos", "relacione"]
         if any(w in query_lower for w in list_words):
             intent = "list"
 
@@ -281,7 +289,7 @@ class OracleEngine:
             intent = "count"
 
         value_words = ["qual", "quanto", "quanto custa", "valor", "preco", "total",
-                       "saldo", "custou", "custa"]
+                       "saldo", "custou", "custa", "custo"]
         if any(w in query_lower for w in value_words):
             if intent == "general":
                 intent = "value"
@@ -294,11 +302,14 @@ class OracleEngine:
                 if intent == "general":
                     intent = "entity"
 
-        for word in re.findall(r'[a-zA-Z0-9\u00C0-\u00FF]+', query_lower):
+        for word in re.findall(r'[a-zA-Z\u00C0-\u00FF]+', query_lower):
             if len(word) > 3:
                 entities.append(word)
+                if word not in self.STOP_WORDS:
+                    if not product_name and word not in ("geral",):
+                        product_name = word
 
-        return {"intent": intent, "entities": list(set(entities)), "original": query}
+        return {"intent": intent, "entities": list(set(entities)), "original": query, "product": product_name}
 
     def _extract_by_intent(self, intent: str, query: str, chunks: List[Tuple], analysis: Dict) -> str:
         if not chunks:
@@ -314,32 +325,50 @@ class OracleEngine:
         else:
             return self._extract_answer(query, chunks)
 
+    def _format_product_line(self, line: str) -> Optional[str]:
+        parts = re.split(r'\s{2,}', line.strip())
+        if len(parts) >= 4:
+            name = parts[0].strip()
+            qty = parts[1].strip()
+            price = parts[2].strip()
+            total = parts[3].strip()
+            if re.search(r'\d', qty) and re.search(r'[Rr]\$', price):
+                t = re.sub(r'^.*?(R\$\s*[\d,.]+)', r'\1', total) if 'R$' not in parts[3] else parts[3].strip()
+                return f"{name} — {qty} un x {price} = {t}"
+        if len(parts) >= 3:
+            name = parts[0].strip()
+            rest = " — ".join(p.strip() for p in parts[1:] if p.strip())
+            return f"{name} — {rest}"
+        if "  " in line:
+            parts2 = re.split(r'\s{2,}', line)
+            return " — ".join(p.strip() for p in parts2 if p.strip())
+        return None
+
     def _extract_list(self, query: str, chunks: List[Tuple]) -> str:
-        table_lines = []
+        product_name = self._get_query_product(query.lower())
         seen = set()
+        products = []
         for _, _, text, _ in chunks:
-            lines = text.split("\n")
-            for line in lines:
+            for line in text.split("\n"):
                 line = line.strip()
                 if not line or len(line) < 5:
                     continue
-                if re.match(r'^[A-Z\s]{5,}$', line):
+                if re.match(r'^(?:nota|fiscal|cnpj|inscricao|destinatario|emitente|produtos)', line, re.IGNORECASE):
                     continue
-                if re.search(r'\d+', line) and not re.match(r'^(?:nota|fiscal|cnpj|inscricao)', line, re.IGNORECASE):
-                    key = line[:60].lower()
-                    if key not in seen:
-                        seen.add(key)
-                        table_lines.append(line)
+                if not re.search(r'\d+', line):
+                    continue
+                if product_name and product_name not in line.lower():
+                    continue
+                key = line[:60].lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                formatted = self._format_product_line(line)
+                if formatted:
+                    products.append(formatted)
 
-        if table_lines:
-            formatted = []
-            for line in table_lines[:15]:
-                if "  " in line:
-                    parts = re.split(r'\s{2,}', line)
-                    formatted.append(" - ".join(p.strip() for p in parts if p.strip()))
-                else:
-                    formatted.append(line)
-            return "\n".join(formatted)
+        if products:
+            return "\n".join(products[:20])
 
         all_text = "\n".join(t for _, _, t, _ in chunks)
         raw_lines = [l.strip() for l in all_text.split("\n") if l.strip() and len(l.strip()) > 5]
@@ -349,9 +378,11 @@ class OracleEngine:
             if re.match(r'^[A-Z\s]{5,}$', line):
                 continue
             if re.search(r'\d+', line):
-                key = line[:50].lower()
-                if key not in seen2:
-                    seen2.add(key)
+                if product_name and product_name not in line.lower():
+                    continue
+                key2 = line[:50].lower()
+                if key2 not in seen2:
+                    seen2.add(key2)
                     items.append(line)
         return "\n".join(items[:15]) if items else ""
 
@@ -365,45 +396,39 @@ class OracleEngine:
         return ""
 
     def _extract_value(self, query: str, chunks: List[Tuple]) -> str:
+        query_lower = query.lower()
+        query_words = set(re.findall(r'[a-zA-Z\u00C0-\u00FF]+', query_lower))
+        keywords = [w for w in query_words if len(w) > 2]
+        product_name = self._get_query_product(query_lower)
+
         all_text = "\n".join(t for _, _, t, _ in chunks)
+        lines = [l.strip() for l in all_text.split("\n") if l.strip()]
+
+        if product_name:
+            product_lines = [l for l in lines if product_name.lower() in l.lower()]
+            if not product_lines:
+                product_lines = [l for l in lines if any(k.lower() in l.lower() for k in keywords if len(k) > 3)]
+        else:
+            product_lines = []
+
+        if product_lines:
+            formatted_products = []
+            for pline in product_lines:
+                fp = self._format_product_line(pline)
+                if fp:
+                    formatted_products.append(fp)
+                else:
+                    formatted_products.append(pline)
+            return "\n".join(formatted_products[:5])
 
         money_values = re.findall(r'[Rr]\$\s*[\d,.]+', all_text)
-        number_values = re.findall(r'\b\d{1,3}(?:\.\d{3})*(?:,\d{2})?\b', all_text)
+        if money_values:
+            if len(money_values) <= 3:
+                return f"Valores: {', '.join(money_values)}"
+            last = money_values[-1]
+            return f"Valores: {', '.join(money_values[:4])} ... Total: {last}"
 
-        query_lower = query.lower()
-        keywords = [w for w in re.findall(r'[a-zA-Z]+', query_lower) if len(w) > 2]
-        total_keywords = any(k in query_lower for k in ["total", "valor", "montante", "soma"])
-
-        if total_keywords and len(money_values) >= 2:
-            return f"Valores encontrados: {', '.join(money_values)}"
-
-        relevant_sentences = []
-        for _, _, text, _ in chunks:
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                has_money = bool(re.search(r'[Rr]\$', line))
-                has_number = bool(re.search(r'\d+', line))
-                if has_money:
-                    match_score = sum(1 for k in keywords if k in line.lower())
-                    if match_score > 0 or len(keywords) == 0:
-                        relevant_sentences.append(line)
-
-        if relevant_sentences:
-            return "\n".join(relevant_sentences[:5])
-
-        for _, _, text, _ in chunks:
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                match_score = sum(1 for k in keywords if k in line.lower())
-                if match_score >= 2:
-                    relevant_sentences.append(line)
-        if relevant_sentences:
-            return "\n".join(relevant_sentences[:3])
-        return ""
+        return "Valor nao encontrado no documento."
 
     def _extract_entity(self, query: str, chunks: List[Tuple], entities: List[str]) -> str:
         entity = entities[0].lower() if entities else ""
@@ -475,6 +500,9 @@ class OracleEngine:
         else:
             rerank_norm = np.full_like(rerank_scores, 0.5)
         query_vec = self.embedder.encode_query(query)
+        query_lower = query.lower()
+        query_content_words = {w for w in re.findall(r'[a-zA-Z\u00C0-\u00FF]+', query_lower) if len(w) > 2}
+
         relevant = []
         scores = []
         for i, (doc_id, _, text, source) in enumerate(chunks):
@@ -484,6 +512,12 @@ class OracleEngine:
             sim = float(np.dot(query_vec, doc_vec))
             sim_norm = max(0.0, (sim + 1.0) / 2.0)
             combined = 0.6 * rerank_norm[i] + 0.4 * sim_norm
+            text_lower = text.lower()
+            word_match = sum(1 for w in query_content_words if w in text_lower)
+            if word_match >= 2:
+                combined = max(combined, 0.50)
+            if word_match >= 4:
+                combined = max(combined, 0.65)
             relevant.append((doc_id, combined, text, source))
             scores.append(combined)
         if not relevant and chunks:
@@ -665,6 +699,12 @@ class OracleEngine:
                 for c in relevant_chunks[:3]
             ],
         }
+
+    def _get_query_product(self, query_lower: str) -> str:
+        for word in re.findall(r'[a-zA-Z\u00C0-\u00FF]+', query_lower):
+            if len(word) > 3 and word not in self.STOP_WORDS:
+                return word
+        return ""
 
     def clear_cache(self):
         self._cached_ask.clear()
