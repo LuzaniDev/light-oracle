@@ -171,19 +171,25 @@ def interactive():
 
 @app.command()
 def sql(
-    db: str = typer.Argument(..., help="Caminho do banco SQLite"),
+    db: str = typer.Argument(..., help="Caminho do banco"),
     query: str = typer.Argument(None, help="Consulta SQL opcional"),
+    fbhost: str = typer.Option("localhost", "--fbhost", help="Host Firebird (server mode)"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Saída em JSON"),
 ):
     live, persistent, engine = get_pipelines()
     if not os.path.exists(db):
         console.print(f"[red]Erro:[/red] Banco não encontrado: {db}")
         raise typer.Exit(1)
-    conn_name = engine.connect_sqlite(db)
+    ext = os.path.splitext(db)[1].lower()
+    if ext == '.eco':
+        console.print(f"[yellow]Detectado formato .ECO (Firebird)[/yellow]")
+        conn_name = engine.connect_firebird(db, host=fbhost)
+    else:
+        conn_name = engine.connect_sqlite(db)
     console.print(f"[green]Conectado:[/green] {os.path.basename(db)}")
     if query:
         text = engine.query_sql(conn_name, query)
-        console.print(text[:1000])
+        console.print(text[:2000])
 
 @app.command()
 def web(

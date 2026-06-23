@@ -1,19 +1,58 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import sqlite3
 import re
+import os
 
 
 class SQLConnector:
     def __init__(self):
-        self.connections: Dict[str, object] = {}
+        self.connections: Dict[str, Any] = {}
         self.schemas: Dict[str, List[Dict]] = {}
+        self._drivers: Dict[str, str] = {}
 
     def connect_sqlite(self, db_path: str, alias: str = "") -> str:
         name = alias or f"sqlite:{db_path}"
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("SELECT 1")
+            self.connections[name] = conn
+            self._drivers[name] = "sqlite"
+            self._extract_schema_sqlite(conn, name)
+            return name
+        except sqlite3.DatabaseError:
+            return self._try_firebird(db_path, name)
+
+    def _try_firebird(self, db_path: str, name: str) -> str:
+        try:
+            import fdb
+            fdb.load_api()
+            try:
+                conn = fdb.connect(database=db_path, user='SYSDBA', password='masterkey')
+            except Exception:
+                conn = fdb.connect(host='localhost', database=db_path, user='SYSDBA', password='masterkey')
+            self.connections[name] = conn
+            self._drivers[name] = "firebird"
+            self._extract_schema_firebird(conn, name)
+            return name
+        except Exception as fb_err:
+            raise sqlite3.DatabaseError(
+                f"Arquivo nao e SQLite valido. Tentativa Firebird falhou: {fb_err}"
+            )
+
+    def connect_firebird(self, db_path: str, user: str = "SYSDBA",
+                         password: str = "masterkey", host: str = "localhost",
+                         alias: str = "") -> str:
+        import fdb
+        fdb.load_api()
+        name = alias or f"firebird:{os.path.basename(db_path)}"
+        kwargs = {"database": db_path, "user": user, "password": password}
+        if host:
+            kwargs["host"] = host
+        conn = fdb.connect(**kwargs)
         self.connections[name] = conn
-        self._extract_schema_sqlite(conn, name)
+        self._drivers[name] = "firebird"
+        self._extract_schema_firebird(conn, name)
         return name
 
     def connect_mysql(self, host: str, port: int, user: str, password: str, database: str, alias: str = "") -> str:
@@ -49,6 +88,27 @@ class SQLConnector:
             schema.append({"table": table, "columns": cols})
         self.schemas[name] = schema
 
+    def _extract_schema_firebird(self, conn, name: str):
+        cursor = conn.cursor()
+        cursor.execute("SELECT rdb$relation_name FROM rdb$relations WHERE rdb$view_blr IS NULL AND rdb$system_flag = 0")
+        tables = []
+        for row in cursor.fetchall():
+            t = row[0].strip() if hasattr(row[0], 'strip') else row[0]
+            tables.append(t)
+        schema = []
+        for table in tables:
+            cursor.execute(
+                "SELECT rdb$field_name FROM rdb$relation_fields "
+                "WHERE rdb$relation_name = ? ORDER BY rdb$field_position",
+                (table,)
+            )
+            cols = []
+            for row in cursor.fetchall():
+                col = row[0].strip() if hasattr(row[0], 'strip') else row[0]
+                cols.append(col.lower())
+            schema.append({"table": table.lower(), "columns": cols})
+        self.schemas[name] = schema
+
     def _extract_schema_generic(self, conn, name: str):
         cursor = conn.cursor()
         cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
@@ -69,9 +129,19 @@ class SQLConnector:
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
         rows = cursor.fetchall()
         result = []
+        driver = self._drivers.get(conn_name, "sqlite")
         for row in rows:
             if isinstance(row, dict):
-                result.append(dict(row))
+                result.append({k.lower(): v for k, v in row.items()})
+            elif hasattr(row, '__getitem__') and not isinstance(row, (str, bytes)):
+                d = {}
+                for i, col in enumerate(columns):
+                    val = row[i] if i < len(row) else None
+                    col_clean = col.lower() if isinstance(col, str) else str(col).lower()
+                    if hasattr(val, 'strip') and hasattr(val, 'upper'):
+                        pass
+                    d[col_clean] = val
+                result.append(d)
             elif isinstance(row, (sqlite3.Row,)):
                 result.append(dict(row))
             else:

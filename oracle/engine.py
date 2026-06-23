@@ -211,6 +211,13 @@ class OracleEngine:
         self.index_document(schema_text, source=f"sql_schema:{name}")
         return name
 
+    def connect_firebird(self, db_path: str, host: str = "localhost",
+                         user: str = "SYSDBA", password: str = "masterkey") -> str:
+        name = self.sql.connect_firebird(db_path, user=user, password=password, host=host)
+        schema_text = self.sql.get_schema_text(name)
+        self.index_document(schema_text, source=f"sql_schema:{name}")
+        return name
+
     def connect_mysql(self, host: str, port: int, user: str, password: str, database: str) -> str:
         name = self.sql.connect_mysql(host, port, user, password, database)
         schema_text = self.sql.get_schema_text(name)
