@@ -175,6 +175,9 @@ class SQLConnector:
         schema = self.schemas.get(conn_name, [])
         return [t["table"] for t in schema]
 
+    def list_databases(self) -> List[str]:
+        return list(self.connections.keys())
+
     def disconnect(self, conn_name: str):
         conn = self.connections.pop(conn_name, None)
         if conn:

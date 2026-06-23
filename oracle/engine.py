@@ -1,4 +1,5 @@
 import numpy as np
+import re
 from typing import List, Tuple, Dict, Optional
 from .models.embedder import Embedder
 from .models.reranker import Reranker
@@ -16,17 +17,13 @@ from .utils.config import OracleConfig
 class OracleEngine:
     def __init__(self, config: Optional[OracleConfig] = None):
         self.config = config or OracleConfig()
-        self.embedder = Embedder(
-            model_name=self.config.embed_model_name,
-            use_dim=self.config.embed_use_dim,
-            batch_size=self.config.embed_batch_size,
-        )
-        self.reranker = Reranker(
-            model_name=self.config.reranker_model_name,
-            batch_size=self.config.reranker_batch_size,
-        )
+        self._embedder = None
+        self._reranker = None
+        self._embedder_loading = False
+        self._reranker_loading = False
         self.bm25 = BM25Index(self.config.sqlite_db_path)
-        self.dense = DenseIndex(self.embedder, self.config.indexes_dir)
+        self._dense = None
+        self._dense_loaded = False
         self.hyde = HyDEGenerator()
         self.multi_query = MultiQueryGenerator(self.config.num_queries)
         self.fusion = HybridFusion(top_k=self.config.rrf_top_k)
@@ -37,12 +34,55 @@ class OracleEngine:
         )
         self.web = WebFallback(max_results=self.config.web_max_results)
         self.sql = SQLConnector()
-        self.sql_sources: Dict[str, str] = {}
+        self._cached_ask = {}
+
+    @property
+    def embedder(self):
+        if self._embedder is None and not self._embedder_loading:
+            self._embedder_loading = True
+            self._embedder = Embedder(
+                model_name=self.config.embed_model_name,
+                use_dim=self.config.embed_use_dim,
+                batch_size=self.config.embed_batch_size,
+            )
+        return self._embedder
+
+    @embedder.setter
+    def embedder(self, value):
+        self._embedder = value
+
+    @property
+    def reranker(self):
+        if self._reranker is None and not self._reranker_loading:
+            self._reranker_loading = True
+            self._reranker = Reranker(
+                model_name=self.config.reranker_model_name,
+                batch_size=self.config.reranker_batch_size,
+            )
+        return self._reranker
+
+    @reranker.setter
+    def reranker(self, value):
+        self._reranker = value
+
+    @property
+    def dense(self):
+        if self._dense is None:
+            self._dense = DenseIndex(self.embedder, self.config.indexes_dir)
+        return self._dense
+
+    @dense.setter
+    def dense(self, value):
+        self._dense = value
         self._load_existing()
 
     def _load_existing(self):
-        self.dense.load()
-        if self.dense.chunks:
+        if not self._dense_loaded:
+            if self._dense is None:
+                self._dense = DenseIndex(self.embedder, self.config.indexes_dir)
+            self._dense.load()
+            self._dense_loaded = True
+        if self._dense and self._dense.chunks:
             texts = [c["text"] for c in self.dense.chunks]
             for i in range(0, len(texts), 50):
                 batch = texts[i:i+50]
@@ -59,6 +99,15 @@ class OracleEngine:
         return len(chunks)
 
     def ask(self, query: str) -> Dict:
+        cache_key = query.lower().strip()
+        if cache_key in self._cached_ask:
+            return self._cached_ask[cache_key]
+
+        sql_result = self._try_sql_query(query)
+        if sql_result:
+            self._cached_ask[cache_key] = sql_result
+            return sql_result
+
         analysis = self._analyze_query(query)
         self_rag_token = self._decide_retrieve(analysis)
 
@@ -86,6 +135,7 @@ class OracleEngine:
                     seen_ids.add(r[0])
 
         fused = self.fusion.fuse(bm25_results, all_dense)
+        fused = self._filter_schema_chunks(fused)
         if not fused:
             return self._build_response(query, [], [], "", "unknown", 0, "[No Support]")
 
@@ -108,35 +158,176 @@ class OracleEngine:
         elif confidence >= 0.40:
             decision = "[Partially]"
             answer = self._extract_answer(query, relevant_chunks)
-            if len(answer) < 30:
-                rewritten = self._rewrite_query(query)
-                if rewritten != query:
-                    return self.ask(rewritten)
         else:
             web_result = self._web_fallback(query)
             if web_result["decision"] != "[No Support]" and web_result.get("answer"):
                 return web_result
             decision = "[No Support]"
-            answer = "Não encontrei informação suficiente nos documentos disponíveis."
+            answer = "Nao encontrei informacao suficiente nos documentos disponiveis."
 
-        return self._build_response(
+        result = self._build_response(
             query, relevant_chunks, diversified, answer,
             self._get_main_source(diversified), confidence, decision
         )
+        self._cached_ask[cache_key] = result
+        return result
+
+    def _filter_schema_chunks(self, chunks: List[Tuple]) -> List[Tuple]:
+        filtered = []
+        for c in chunks:
+            source = c[3] if len(c) > 3 else ""
+            text = c[2] if len(c) > 2 else ""
+            if source.startswith("sql_schema:"):
+                continue
+            if source.startswith("sql_query:"):
+                continue
+            if re.match(r'^[a-z_]+\d*:', text.strip()):
+                continue
+            colon_count = text.count(":")
+            if colon_count > 10:
+                continue
+            filtered.append(c)
+        return filtered
+
+    def _try_sql_query(self, query: str) -> Optional[Dict]:
+        db_names = self.sql.list_databases()
+        if not db_names:
+            return None
+        keywords = ["quanto", "quantos", "qual", "quais", "lista", "liste", "mostre",
+                     "valor", "total", "dados", "informacao", "cadastro", "tabela",
+                     "cliente", "produto", "pedido", "venda", "estoque", "fornecedor",
+                     "nf", "nota", "fiscal", "preco", "custo", "saldo", "estoque"]
+        query_lower = query.lower()
+        if not any(k in query_lower for k in keywords):
+            return None
+        return self._generate_and_execute_sql(query, db_names[0])
+
+    def _generate_and_execute_sql(self, query: str, db_name: str) -> Optional[Dict]:
+        schema = self.sql.schemas.get(db_name, [])
+        if not schema:
+            return None
+
+        tables = [t for t in schema if not t["table"].startswith("ECO$")]
+        query_lower = query.lower()
+
+        table_scores = []
+        for t in tables:
+            name = t["table"].lower()
+            score = 0
+            for col in t["columns"]:
+                col_lower = col.lower()
+                if any(w in col_lower for w in query_lower.split() if len(w) > 3):
+                    score += 2
+            words_in_name = set(re.findall(r'[a-z0-9]+', name))
+            for q_word in re.findall(r'[a-z0-9]+', query_lower):
+                if len(q_word) > 3 and q_word in words_in_name:
+                    score += 5
+            if score > 0:
+                table_scores.append((t, score))
+
+        table_scores.sort(key=lambda x: x[1], reverse=True)
+        if not table_scores:
+            return None
+
+        best_table = table_scores[0][0]
+        table_name = best_table["table"]
+        columns = best_table["columns"]
+
+        where_clauses = []
+        search_terms = [w for w in re.findall(r'[a-z0-9]+', query_lower) if len(w) > 3]
+
+        for term in search_terms:
+            relevant_cols = [c for c in columns if any(k in c.lower() for k in
+                            ["descricao", "nome", "fantasia", "produto", "titulo",
+                             "resumo", "observacao", "marca", "modelo", "codigo"])]
+            if relevant_cols:
+                col = relevant_cols[0]
+                where_clauses.append(f"UPPER({col}) LIKE UPPER('%{term}%')")
+
+        numbers = re.findall(r'\d+', query)
+        num_cols = [c for c in columns if any(k in c.lower() for k in
+                   ["codigo", "numero", "id", "gid", "pedido", "nota", "documento"])]
+        if numbers and num_cols:
+            where_clauses.append(f"{num_cols[0]} = {numbers[0]}")
+
+        aggregate = ""
+        if any(w in query_lower for w in ["quantos", "quantas", "total de", "numero de", "conta"]):
+            if "COUNT" not in aggregate and "quant" in query_lower:
+                aggregate = "COUNT(*)"
+        else:
+            limit_cols = [c for c in [c for c in columns if c.lower() not in
+                         ["senha", "password", "hash", "token", "foto", "imagem", "logotipo"]][:8]]
+            aggregate = ", ".join(limit_cols) if limit_cols else "*"
+
+        if aggregate == "COUNT(*)":
+            sql = f"SELECT COUNT(*) AS total FROM {table_name}"
+        else:
+            sql = f"SELECT {aggregate} FROM {table_name}"
+
+        if where_clauses:
+            sql += " WHERE " + " OR ".join(where_clauses[:3])
+
+        if aggregate != "COUNT(*)":
+            sql += " FETCH FIRST 10 ROWS ONLY"
+
+        try:
+            rows = self.sql.execute_query(db_name, sql)
+        except Exception as e:
+            try:
+                sql_simple = f"SELECT COUNT(*) AS total FROM {table_name}"
+                rows = self.sql.execute_query(db_name, sql_simple)
+            except Exception:
+                return None
+
+        if not rows:
+            return {"query": query, "answer": "Nenhum resultado encontrado no banco.",
+                    "confidence": 0.0, "decision": "[Partially]", "source": db_name,
+                    "chunks": [{"text": sql, "score": 1.0, "source": db_name}]}
+
+        formatted = self._format_sql_result(rows, sql, table_name, query)
+        return {"query": query, "answer": formatted, "confidence": 0.85,
+                "decision": "[Supported]", "source": f"sql:{table_name}",
+                "chunks": [{"text": f"Query: {sql}", "score": 1.0, "source": db_name}]}
+
+    def _format_sql_result(self, rows: List[Dict], sql: str, table: str, query: str) -> str:
+        if not rows:
+            return "Nenhum resultado."
+        if len(rows) == 1 and "total" in rows[0] and "COUNT" in sql:
+            count = rows[0]["total"]
+            table_pt = table.replace("trec", "").replace("tspd", "").replace("ger", "")
+            return f"Total encontrado: {count} registro(s) na tabela {table_pt}."
+
+        lines = []
+        for row in rows[:8]:
+            parts = []
+            for k, v in row.items():
+                k_clean = k.replace("_", " ").capitalize()
+                if k.lower() in ("senha", "password", "hash", "token", "foto"):
+                    continue
+                if v is None:
+                    continue
+                val_str = str(v)[:60]
+                parts.append(f"{k_clean}: {val_str}")
+            if parts:
+                lines.append(" | ".join(parts))
+
+        if len(rows) > 8:
+            lines.append(f"... e mais {len(rows) - 8} registro(s)")
+
+        return "\n".join(lines) if lines else str(rows[0])
 
     def _analyze_query(self, query: str) -> Dict:
         query_lower = query.lower()
-        entities = []
         intent = "fact"
-        if any(w in query_lower for w in ["qual", "quais", "quanto", "valor", "número", "código"]):
+        if any(w in query_lower for w in ["qual", "quais", "quanto", "valor", "numero", "codigo"]):
             intent = "value"
         elif any(w in query_lower for w in ["como", "procedimento", "passo", "etapa"]):
             intent = "procedure"
-        elif any(w in query_lower for w in ["lista", "quais são", "liste", "enumere"]):
+        elif any(w in query_lower for w in ["lista", "quais sao", "liste", "enumere", "mostre"]):
             intent = "list"
-        elif any(w in query_lower for w in ["diferença", "comparar", "vs", "versus"]):
+        elif any(w in query_lower for w in ["diferenca", "comparar", "vs", "versus"]):
             intent = "comparison"
-        return {"intent": intent, "entities": entities, "original": query}
+        return {"intent": intent, "entities": [], "original": query}
 
     def _decide_retrieve(self, analysis: Dict) -> str:
         return "[Retrieve]"
@@ -156,6 +347,8 @@ class OracleEngine:
         relevant = []
         scores = []
         for i, (doc_id, _, text, source) in enumerate(chunks):
+            if source.startswith("sql_"):
+                continue
             doc_vec = self.embedder.encode_query(text[:512])
             sim = float(np.dot(query_vec, doc_vec))
             sim_norm = max(0.0, (sim + 1.0) / 2.0)
@@ -170,7 +363,6 @@ class OracleEngine:
     def _extract_answer(self, query: str, chunks: List[Tuple]) -> str:
         if not chunks:
             return ""
-        import re
         query_words = set(re.findall(r'[A-Za-z0-9À-ÿ]+', query.lower()))
         query_numbers = set(re.findall(r'\d+', query))
 
@@ -188,7 +380,7 @@ class OracleEngine:
             raw_sents = re.split(r'(?<=[.!?\n])\s*', text)
             for s in raw_sents:
                 s = s.strip()
-                if s and len(s) > 15:
+                if s and len(s) > 15 and ":" not in s[:5]:
                     all_sentences.append((s, score_sentence(s)))
 
         all_sentences.sort(key=lambda x: x[1], reverse=True)
@@ -207,27 +399,19 @@ class OracleEngine:
 
     def connect_sqlite(self, db_path: str) -> str:
         name = self.sql.connect_sqlite(db_path)
-        schema_text = self.sql.get_schema_text(name)
-        self.index_document(schema_text, source=f"sql_schema:{name}")
         return name
 
     def connect_firebird(self, db_path: str, host: str = "localhost",
                          user: str = "SYSDBA", password: str = "masterkey") -> str:
         name = self.sql.connect_firebird(db_path, user=user, password=password, host=host)
-        schema_text = self.sql.get_schema_text(name)
-        self.index_document(schema_text, source=f"sql_schema:{name}")
         return name
 
     def connect_mysql(self, host: str, port: int, user: str, password: str, database: str) -> str:
         name = self.sql.connect_mysql(host, port, user, password, database)
-        schema_text = self.sql.get_schema_text(name)
-        self.index_document(schema_text, source=f"sql_schema:{name}")
         return name
 
     def query_sql(self, conn_name: str, sql: str) -> str:
-        text = self.sql.query_to_text(conn_name, sql)
-        self.index_document(text, source=f"sql_query:{conn_name}")
-        return text
+        return self.sql.query_to_text(conn_name, sql)
 
     def _web_fallback(self, query: str) -> Dict:
         if not self.config.web_fallback_enabled:
@@ -274,3 +458,6 @@ class OracleEngine:
                 for c in relevant_chunks[:3]
             ],
         }
+
+    def clear_cache(self):
+        self._cached_ask.clear()

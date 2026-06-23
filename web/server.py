@@ -144,7 +144,11 @@ async def stats():
 @app.get("/api/sql")
 async def sql_query(db: str, query: str):
     engine, live, persistent = get_engine()
-    conn_name = engine.connect_sqlite(db)
+    ext = os.path.splitext(db)[1].lower()
+    if ext == '.eco':
+        conn_name = engine.connect_firebird(db)
+    else:
+        conn_name = engine.connect_sqlite(db)
     text = engine.query_sql(conn_name, query)
     return {"result": text}
 
