@@ -35,6 +35,7 @@ class OracleEngine:
         self.web = WebFallback(max_results=self.config.web_max_results)
         self.sql = SQLConnector()
         self._cached_ask = {}
+        self._load_existing()
 
     @property
     def embedder(self):
@@ -137,7 +138,14 @@ class OracleEngine:
         fused = self.fusion.fuse(bm25_results, all_dense)
         fused = self._filter_schema_chunks(fused)
         if not fused:
-            return self._build_response(query, [], [], "", "unknown", 0, "[No Support]")
+            bm25_simple = self.bm25.search(query, self.config.bm25_top_k * 2)
+            if bm25_simple:
+                fused = bm25_simple[:5]
+            else:
+                content_count = self.bm25.get_document_count()
+                if content_count == 0:
+                    return self._build_response(query, [], [], "Nenhum documento foi indexado ainda. Faca upload de um arquivo primeiro.", "", 0, "[No Support]")
+                return self._build_response(query, [], [], "", "unknown", 0, "[No Support]")
 
         doc_texts = [r[2] for r in fused]
         reranked = self.reranker.rerank(query, doc_texts, top_k=len(fused))
@@ -181,12 +189,18 @@ class OracleEngine:
                 continue
             if source.startswith("sql_query:"):
                 continue
-            if re.match(r'^[a-z_]+\d*:', text.strip()):
+            field_like = re.findall(r'^[a-z_]+\d*:\s', text.strip()[:40])
+            if field_like and len(field_like) >= 3:
                 continue
             colon_count = text.count(":")
-            if colon_count > 10:
+            total_lines = text.count("\n") + 1
+            if colon_count > 30 and total_lines < colon_count / 2:
                 continue
             filtered.append(c)
+        if not filtered and chunks:
+            filtered = [c for c in chunks if not c[3].startswith("sql_")]
+        if not filtered:
+            filtered = chunks[:3]
         return filtered
 
     def _try_sql_query(self, query: str) -> Optional[Dict]:
@@ -347,15 +361,23 @@ class OracleEngine:
         relevant = []
         scores = []
         for i, (doc_id, _, text, source) in enumerate(chunks):
-            if source.startswith("sql_"):
+            if source.startswith("sql_schema:") or source.startswith("sql_query:"):
                 continue
             doc_vec = self.embedder.encode_query(text[:512])
             sim = float(np.dot(query_vec, doc_vec))
             sim_norm = max(0.0, (sim + 1.0) / 2.0)
             combined = 0.6 * rerank_norm[i] + 0.4 * sim_norm
-            if combined > 0.1:
-                relevant.append((doc_id, combined, text, source))
-                scores.append(combined)
+            relevant.append((doc_id, combined, text, source))
+            scores.append(combined)
+
+        if not relevant and chunks:
+            for i, (doc_id, _, text, source) in enumerate(chunks):
+                if not source.startswith("sql_"):
+                    relevant.append((doc_id, 0.15, text, source))
+                    scores.append(0.15)
+                    if len(relevant) >= 3:
+                        break
+
         confidence = float(np.mean(scores)) if scores else 0.0
         relevant.sort(key=lambda x: x[1], reverse=True)
         return relevant[:5], confidence

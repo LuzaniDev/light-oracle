@@ -1,30 +1,7 @@
 import os
-import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from typing import List
-
-
-def _short_path(path: str) -> str:
-    try:
-        result = subprocess.run(
-            ["cmd", "/c", f'for %A in ("{path}") do @echo %~sA'],
-            capture_output=True, text=True, shell=True
-        )
-        short = result.stdout.strip()
-        if short and os.path.exists(short):
-            return short
-    except Exception:
-        pass
-    return path
-
-
-def _ascii_path(base: str) -> str:
-    short = _short_path(base)
-    if any(ord(c) > 127 for c in short):
-        fallback = os.path.join(tempfile.gettempdir(), "light-oracle")
-        return fallback
-    return short
 
 
 @dataclass
@@ -83,8 +60,8 @@ class OracleConfig:
 
     def __post_init__(self):
         if not self.base_dir:
-            raw = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            self.base_dir = _ascii_path(raw)
+            temp_root = os.path.join(tempfile.gettempdir(), "oracle-rag")
+            self.base_dir = temp_root
         self.models_dir = os.path.join(self.base_dir, "models")
         self.indexes_dir = os.path.join(self.base_dir, "indexes")
         self.data_dir = os.path.join(self.base_dir, "data")

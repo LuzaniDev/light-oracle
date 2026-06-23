@@ -64,26 +64,41 @@ class BM25Index:
     def search(self, query: str, top_k: int = 50) -> List[Tuple[int, float, str, str]]:
         self.connect()
         cursor = self.conn.cursor()
-        sanitized = self._sanitize_query(query)
-        if not sanitized:
-            return []
-        sql = """
-            SELECT d.id, rank, d.text, d.source
-            FROM docs_fts f
-            JOIN documents d ON d.id = f.rowid
-            WHERE docs_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-        """
-        try:
-            cursor.execute(sql, (sanitized, top_k))
-            results = []
-            for rowid, rank, text, source in cursor.fetchall():
-                score = 1.0 / (1.0 + abs(rank))
-                results.append((rowid, score, text, source))
-            return results
-        except sqlite3.OperationalError:
-            return []
+        results = []
+        seen_ids = set()
+
+        strategies = [
+            self._sanitize_query(query),
+            self._sanitize_query(query.replace("?", "").replace("!", "").replace(",", "")),
+        ]
+
+        key_words = [w for w in query.split() if len(w) > 3]
+        if key_words:
+            strategies.append(" OR ".join(f'"{w}"' for w in key_words[:5]))
+
+        for sanitized in strategies:
+            if not sanitized:
+                continue
+            try:
+                sql = """
+                    SELECT d.id, rank, d.text, d.source
+                    FROM docs_fts f
+                    JOIN documents d ON d.id = f.rowid
+                    WHERE docs_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                """
+                cursor.execute(sql, (sanitized, top_k))
+                for rowid, rank, text, source in cursor.fetchall():
+                    if rowid not in seen_ids:
+                        seen_ids.add(rowid)
+                        score = 1.0 / (1.0 + abs(rank))
+                        results.append((rowid, score, text, source))
+            except sqlite3.OperationalError:
+                continue
+
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:top_k]
 
     def _sanitize_query(self, query: str) -> str:
         import re
@@ -93,7 +108,7 @@ class BM25Index:
             word = word.strip('"\'(),.;:!?')
             if len(word) >= 2:
                 terms.append(f'"{word}"')
-        return " OR ".join(terms) if terms else query
+        return " OR ".join(terms) if terms else ""
 
     def get_document_count(self) -> int:
         self.connect()

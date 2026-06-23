@@ -112,7 +112,7 @@ async def ask_stream(query: str, file: Optional[str] = None, web: bool = False):
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...)):
     engine, live, persistent = get_engine()
-    tmp_dir = os.path.join(os.path.dirname(__file__), "..", "data", "uploads")
+    tmp_dir = os.path.join(engine.config.data_dir, "uploads")
     os.makedirs(tmp_dir, exist_ok=True)
     tmp_path = os.path.join(tmp_dir, file.filename)
 
