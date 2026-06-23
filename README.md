@@ -42,29 +42,32 @@ cd ../..
 
 ## Configuracao
 
-Toda a configuracao do sistema e feita pelo arquivo `.env` na raiz do projeto.
-Edite-o para ajustar modelos, portas, chuncks, cache e conexoes com banco.
+Edite o arquivo `config.cfg` na raiz do projeto:
 
 ```bash
-# O arquivo .env ja existe na raiz. Abra e edite conforme necessario.
-notepad .env
+notepad config.cfg
 ```
 
-O `.env` contem todas as opcoes disponiveis com documentacao completa inline.
-Exemplo do que voce encontra la:
+Todas as opcoes disponiveis com documentacao completa:
 
-| Secao | O que configura |
-|---|---|
-| Diretorios | Onde ficam indices, uploads e cache |
-| Modelos de IA | Modelo de embedding e reranker |
-| Leitura (Chunking) | Tamanho e sobreposicao dos pedacos |
-| Busca (Retrieval) | Quantidade de resultados por etapa |
-| Self-RAG | Thresholds de confianca |
-| Web Fallback | Busca na web ativada/desativada |
-| Servidor Web | Porta e host da interface |
-| Banco de Dados | Conexao Firebird (LK.ECO) |
-| Cache | Maximo de perguntas em cache |
-| Seguranca | Avisos sobre exposicao do servidor |
+```
+BASE_DIR         = %TEMP%/oracle-rag   # Diretorio de indices e cache
+EMBED_MODEL      = BAAI/bge-small-en-v1.5
+EMBED_DIM        = 256
+RERANKER_MODEL   = cross-encoder/ms-marco-MiniLM-L-2-v2
+CHUNK_SIZE       = 512
+CONFIDENCE_HIGH  = 0.60
+CONFIDENCE_MEDIUM = 0.40
+WEB_PORT         = 8081
+WEB_HOST         = 127.0.0.1
+WEB_FALLBACK     = true
+FB_HOST          = localhost
+FB_USER          = SYSDBA
+FB_PASSWORD      = masterkey
+```
+
+Para sobrescrever configuracoes sem modificar o arquivo principal (util em time dev):
+Crie `config.local.cfg` na mesma pasta — as chaves la sobrescrevem as do `config.cfg`.
 
 ## Uso
 
@@ -106,7 +109,7 @@ light-oracle/
 ├── web/                  # Interface web
 │   ├── server.py         # FastAPI
 │   └── frontend/         # Vue 3 + Tailwind
-├── .env.example          # Exemplo de configuracao
+├── config.cfg            # Configuracao do sistema
 ├── run_web.py            # Inicializador do servidor web
 ├── demo.py               # Script de demonstracao
 └── requirements.txt      # Dependencias Python

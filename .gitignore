@@ -13,3 +13,5 @@ web/frontend/node_modules/
 *.vsix
 *.log
 .env
+config.local.cfg
+docs/*.gif

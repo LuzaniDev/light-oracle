@@ -1,55 +1,68 @@
 import os
 import tempfile
+import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 
-def env(key: str, default: str = "") -> str:
-    return os.environ.get(key, default)
+def _expand_env(val: str) -> str:
+    return os.path.expandvars(os.path.expanduser(val))
 
 
-def env_int(key: str, default: int) -> int:
-    try:
-        return int(os.environ.get(key, str(default)))
-    except (ValueError, TypeError):
-        return default
-
-
-def env_float(key: str, default: float) -> float:
-    try:
-        return float(os.environ.get(key, str(default)))
-    except (ValueError, TypeError):
-        return default
-
-
-def env_bool(key: str, default: bool) -> bool:
-    val = os.environ.get(key, "").lower()
-    if val in ("1", "true", "yes", "y", "sim", "s"):
-        return True
-    if val in ("0", "false", "no", "n", "nao", "não"):
-        return False
-    return default
-
-
-def load_dotenv(path: Optional[str] = None):
-    if path is None:
-        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        path = os.path.join(base, ".env")
+def _parse_cfg(path: str) -> Dict[str, str]:
+    result = {}
     if not os.path.exists(path):
-        return
+        return result
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
+            if not line or line.startswith("=") or "=" not in line:
                 continue
             key, _, val = line.partition("=")
             key = key.strip()
             val = val.strip()
-            if key.startswith("ORACLE_") and key not in os.environ:
-                os.environ[key] = val
+            if key and val:
+                result[key] = _expand_env(val)
+    return result
 
 
-load_dotenv()
+def load_config(path: Optional[str] = None) -> Dict[str, str]:
+    if path is None:
+        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(base, "config.cfg")
+    cfg = _parse_cfg(path)
+    cfg.update(_parse_cfg(os.path.join(os.path.dirname(path), "config.local.cfg")))
+    return cfg
+
+
+CONFIG = load_config()
+
+
+def cfg(key: str, default: str = "") -> str:
+    return CONFIG.get(key, os.environ.get(key.replace("_", "ORACLE_"), default))
+
+
+def cfg_int(key: str, default: int) -> int:
+    try:
+        return int(cfg(key, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
+def cfg_float(key: str, default: float) -> float:
+    try:
+        return float(cfg(key, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
+def cfg_bool(key: str, default: bool) -> bool:
+    val = cfg(key, "").lower()
+    if val in ("1", "true", "yes", "y", "sim", "s"):
+        return True
+    if val in ("0", "false", "no", "n", "nao", "nao"):
+        return False
+    return default
 
 
 @dataclass
@@ -131,32 +144,32 @@ class OracleConfig:
         "cache_size": 100,
     }
 
-    _ENV_MAP = {
-        "embed_model_name": ("ORACLE_EMBED_MODEL", str),
-        "embed_use_dim": ("ORACLE_EMBED_DIM", int),
-        "embed_batch_size": ("ORACLE_EMBED_BATCH", int),
-        "reranker_model_name": ("ORACLE_RERANKER_MODEL", str),
-        "reranker_batch_size": ("ORACLE_RERANKER_BATCH", int),
-        "chunk_size": ("ORACLE_CHUNK_SIZE", int),
-        "chunk_overlap": ("ORACLE_CHUNK_OVERLAP", int),
-        "bm25_top_k": ("ORACLE_BM25_TOP_K", int),
-        "dense_top_k": ("ORACLE_DENSE_TOP_K", int),
-        "rrf_top_k": ("ORACLE_RRF_TOP_K", int),
-        "num_queries": ("ORACLE_NUM_QUERIES", int),
-        "confidence_high": ("ORACLE_CONFIDENCE_HIGH", float),
-        "confidence_medium": ("ORACLE_CONFIDENCE_MEDIUM", float),
-        "web_max_results": ("ORACLE_WEB_MAX_RESULTS", int),
-        "web_fallback_enabled": ("ORACLE_WEB_FALLBACK", bool),
-        "cache_size": ("ORACLE_CACHE_SIZE", int),
+    _CFG_MAP = {
+        "embed_model_name": ("EMBED_MODEL", str),
+        "embed_use_dim": ("EMBED_DIM", int),
+        "embed_batch_size": ("EMBED_BATCH", int),
+        "reranker_model_name": ("RERANKER_MODEL", str),
+        "reranker_batch_size": ("RERANKER_BATCH", int),
+        "chunk_size": ("CHUNK_SIZE", int),
+        "chunk_overlap": ("CHUNK_OVERLAP", int),
+        "bm25_top_k": ("BM25_TOP_K", int),
+        "dense_top_k": ("DENSE_TOP_K", int),
+        "rrf_top_k": ("RRF_TOP_K", int),
+        "num_queries": ("NUM_QUERIES", int),
+        "confidence_high": ("CONFIDENCE_HIGH", float),
+        "confidence_medium": ("CONFIDENCE_MEDIUM", float),
+        "web_max_results": ("WEB_MAX_RESULTS", int),
+        "web_fallback_enabled": ("WEB_FALLBACK", bool),
+        "cache_size": ("CACHE_SIZE", int),
     }
 
     def __post_init__(self):
         if not self.base_dir:
-            self.base_dir = env("ORACLE_BASE_DIR", os.path.join(tempfile.gettempdir(), "oracle-rag"))
+            self.base_dir = cfg("BASE_DIR", os.path.join(tempfile.gettempdir(), "oracle-rag"))
 
-        for field_name, (env_key, cast) in self._ENV_MAP.items():
-            raw = os.environ.get(env_key)
-            if raw is not None:
+        for field_name, (cfg_key, cast) in self._CFG_MAP.items():
+            raw = cfg(cfg_key)
+            if raw:
                 try:
                     setattr(self, field_name, cast(raw))
                 except (ValueError, TypeError):
