@@ -142,6 +142,7 @@ class OracleConfig:
         "bm25_top_k": ("ORACLE_BM25_TOP_K", int),
         "dense_top_k": ("ORACLE_DENSE_TOP_K", int),
         "rrf_top_k": ("ORACLE_RRF_TOP_K", int),
+        "num_queries": ("ORACLE_NUM_QUERIES", int),
         "confidence_high": ("ORACLE_CONFIDENCE_HIGH", float),
         "confidence_medium": ("ORACLE_CONFIDENCE_MEDIUM", float),
         "web_max_results": ("ORACLE_WEB_MAX_RESULTS", int),

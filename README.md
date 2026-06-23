@@ -42,38 +42,29 @@ cd ../..
 
 ## Configuracao
 
-Crie um arquivo `.env` na raiz do projeto com as configuracoes desejadas:
-
-```ini
-# Oracle RAG - Configuracao local
-# Descomente e ajuste conforme necessario
-
-# ORACLE_BASE_DIR=%TEMP%/oracle-rag
-# ORACLE_EMBED_MODEL=BAAI/bge-small-en-v1.5
-# ORACLE_EMBED_DIM=256
-# ORACLE_EMBED_BATCH=32
-# ORACLE_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-2-v2
-# ORACLE_CHUNK_SIZE=512
-# ORACLE_CHUNK_OVERLAP=64
-# ORACLE_BM25_TOP_K=50
-# ORACLE_DENSE_TOP_K=50
-# ORACLE_RRF_TOP_K=30
-# ORACLE_CONFIDENCE_HIGH=0.60
-# ORACLE_CONFIDENCE_MEDIUM=0.40
-# ORACLE_WEB_FALLBACK=true
-# ORACLE_WEB_MAX_RESULTS=5
-# ORACLE_WEB_PORT=8081
-# ORACLE_WEB_HOST=127.0.0.1
-# ORACLE_FB_HOST=localhost
-# ORACLE_FB_USER=SYSDBA
-# ORACLE_FB_PASSWORD=masterkey
-```
-
-Ou copie o arquivo de exemplo:
+Toda a configuracao do sistema e feita pelo arquivo `.env` na raiz do projeto.
+Edite-o para ajustar modelos, portas, chuncks, cache e conexoes com banco.
 
 ```bash
-copy .env.example .env
+# O arquivo .env ja existe na raiz. Abra e edite conforme necessario.
+notepad .env
 ```
+
+O `.env` contem todas as opcoes disponiveis com documentacao completa inline.
+Exemplo do que voce encontra la:
+
+| Secao | O que configura |
+|---|---|
+| Diretorios | Onde ficam indices, uploads e cache |
+| Modelos de IA | Modelo de embedding e reranker |
+| Leitura (Chunking) | Tamanho e sobreposicao dos pedacos |
+| Busca (Retrieval) | Quantidade de resultados por etapa |
+| Self-RAG | Thresholds de confianca |
+| Web Fallback | Busca na web ativada/desativada |
+| Servidor Web | Porta e host da interface |
+| Banco de Dados | Conexao Firebird (LK.ECO) |
+| Cache | Maximo de perguntas em cache |
+| Seguranca | Avisos sobre exposicao do servidor |
 
 ## Uso
 
