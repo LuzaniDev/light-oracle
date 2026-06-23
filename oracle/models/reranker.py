@@ -12,9 +12,17 @@ class Reranker:
         if not documents:
             return []
         pairs = [[query, doc] for doc in documents]
-        scores = self.model.predict(pairs, batch_size=self.batch_size, show_progress_bar=False)
-        if scores.ndim == 0:
-            scores = np.array([float(scores)])
-        scores = np.array(scores).flatten()
-        top_indices = np.argsort(scores)[::-1][:top_k]
-        return [(int(idx), float(scores[idx])) for idx in top_indices]
+        raw_scores = self.model.predict(pairs, batch_size=self.batch_size, show_progress_bar=False)
+        if raw_scores.ndim == 0:
+            raw_scores = np.array([float(raw_scores)])
+        scores = np.array(raw_scores).flatten()
+        min_s, max_s = scores.min(), scores.max()
+        if max_s > min_s:
+            normalized = (scores - min_s) / (max_s - min_s)
+        elif max_s == 0:
+            normalized = np.full_like(scores, 0.5)
+        else:
+            normalized = np.full_like(scores, 0.5)
+        all_scores = list(zip(range(len(documents)), normalized.tolist()))
+        all_scores.sort(key=lambda x: x[1], reverse=True)
+        return all_scores[:top_k]

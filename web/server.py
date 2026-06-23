@@ -132,13 +132,24 @@ async def upload(file: UploadFile = File(...)):
         raise HTTPException(400, "Nao foi possivel extrair texto do arquivo.")
 
     chunks = engine.index_document(text, source=file.filename)
-    return {"filename": file.filename, "path": tmp_path, "chunks": chunks}
+    sections = engine.available_sections
+    preview = text[:300] if text else ""
+    return {
+        "filename": file.filename,
+        "path": tmp_path,
+        "chunks": chunks,
+        "sections": sections,
+        "preview": preview,
+    }
 
 
 @app.get("/api/stats")
 async def stats():
     engine, live, persistent = get_engine()
-    return persistent.stats()
+    s = persistent.stats()
+    s["sections"] = engine.available_sections
+    s["has_full_docs"] = len(engine.full_docs) > 0
+    return s
 
 
 @app.get("/api/sql")

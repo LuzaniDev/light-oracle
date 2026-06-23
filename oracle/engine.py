@@ -35,6 +35,8 @@ class OracleEngine:
         self.web = WebFallback(max_results=self.config.web_max_results)
         self.sql = SQLConnector()
         self._cached_ask = {}
+        self.full_docs: Dict[str, str] = {}
+        self._last_doc_sections: List[str] = []
         self._load_existing()
 
     @property
@@ -75,7 +77,21 @@ class OracleEngine:
     @dense.setter
     def dense(self, value):
         self._dense = value
-        self._load_existing()
+
+    @property
+    def is_ready(self) -> bool:
+        return bool(self.full_docs) or bool(self.dense.chunks)
+
+    @property
+    def available_sections(self) -> List[str]:
+        seen = set()
+        sections = []
+        for c in self.dense.chunks:
+            s = c.get("section", "geral")
+            if s not in seen:
+                seen.add(s)
+                sections.append(s)
+        return sections or self._last_doc_sections
 
     def _load_existing(self):
         if not self._dense_loaded:
@@ -89,15 +105,24 @@ class OracleEngine:
                 batch = texts[i:i+50]
                 batch_chunks = self.dense.chunks[i:i+50]
                 self.bm25.add_documents(batch_chunks)
+            for c in self.dense.chunks:
+                src = c.get("source", "unknown")
+                if src not in self.full_docs:
+                    self.full_docs[src] = c["text"]
+                else:
+                    self.full_docs[src] += "\n" + c["text"]
 
     def index_document(self, text: str, source: str = "unknown"):
-        chunks = self.chunker.chunk_text(text, source)
-        if not chunks:
+        raw_chunks = self.chunker.chunk_text(text, source)
+        if not raw_chunks:
             return 0
-        self.bm25.add_documents(chunks)
-        self.dense.add_chunks(chunks)
+        self.full_docs[source] = text
+        self._last_doc_sections = list(set(c.get("section", "") for c in raw_chunks if c.get("section")))
+        self.bm25.add_documents(raw_chunks)
+        self.dense.add_chunks(raw_chunks)
         self.dense.save()
-        return len(chunks)
+        self._cached_ask.clear()
+        return len(raw_chunks)
 
     def ask(self, query: str) -> Dict:
         cache_key = query.lower().strip()
@@ -109,14 +134,28 @@ class OracleEngine:
             self._cached_ask[cache_key] = sql_result
             return sql_result
 
-        analysis = self._analyze_query(query)
-        self_rag_token = self._decide_retrieve(analysis)
+        if not self.is_ready:
+            return self._build_response(query, [], [], "Nenhum documento foi carregado ainda. Faca upload de um arquivo primeiro.", "", 0, "[No Support]", [])
 
-        if self_rag_token == "[No Retrieve]":
-            return self._build_response(query, [], [], "", "unknown", 0, "[No Retrieve]")
+        analysis = self._analyze_query(query)
+        intent = analysis.get("intent", "general")
+        entities = analysis.get("entities", [])
+        entities_text = " ".join(entities)
+
+        search_query = query
+        if intent == "list":
+            search_query += " " + " ".join(entities) + " " + " ".join(entities * 2)
+        if intent in ("list", "count"):
+            table_chunks = self._find_table_chunks()
+            if table_chunks:
+                table_answer = self._extract_by_intent(intent, query, table_chunks, analysis)
+                if table_answer:
+                    result = self._build_response(query, table_chunks, table_chunks, table_answer, table_chunks[0].get("source", "unknown"), 0.75, "[Supported]", self.available_sections)
+                    self._cached_ask[cache_key] = result
+                    return result
 
         hyde_query = self.hyde.generate(query)
-        bm25_results = self.bm25.search(query, self.config.bm25_top_k)
+        bm25_results = self.bm25.search(search_query, self.config.bm25_top_k)
         bm25_hyde = self.bm25.search(hyde_query, self.config.bm25_top_k // 2)
         seen_bm25 = {r[0] for r in bm25_results}
         for r in bm25_hyde:
@@ -136,19 +175,11 @@ class OracleEngine:
                     seen_ids.add(r[0])
 
         fused = self.fusion.fuse(bm25_results, all_dense)
-        fused = self._filter_schema_chunks(fused)
         if not fused:
-            bm25_simple = self.bm25.search(query, self.config.bm25_top_k * 2)
-            if bm25_simple:
-                fused = bm25_simple[:5]
-            else:
-                content_count = self.bm25.get_document_count()
-                if content_count == 0:
-                    return self._build_response(query, [], [], "Nenhum documento foi indexado ainda. Faca upload de um arquivo primeiro.", "", 0, "[No Support]")
-                return self._build_response(query, [], [], "", "unknown", 0, "[No Support]")
+            return self._fallback_fulltext(query, intent)
 
         doc_texts = [r[2] for r in fused]
-        reranked = self.reranker.rerank(query, doc_texts, top_k=len(fused))
+        reranked = self.reranker.rerank(search_query, doc_texts, top_k=len(fused))
         reranked_results = [(fused[idx][0], score, fused[idx][2], fused[idx][3]) for idx, score in reranked]
 
         query_vec = self.embedder.encode_query(query)
@@ -157,51 +188,327 @@ class OracleEngine:
 
         relevant_chunks, confidence = self._evaluate_chunks(query, diversified)
 
-        if confidence >= self.config.confidence_high:
-            decision = "[Supported]"
-            answer = self._extract_answer(query, relevant_chunks)
-        elif confidence >= self.config.confidence_medium:
-            decision = "[Partially]"
-            answer = self._extract_answer(query, relevant_chunks)
-        elif confidence >= 0.40:
-            decision = "[Partially]"
-            answer = self._extract_answer(query, relevant_chunks)
-        else:
-            web_result = self._web_fallback(query)
-            if web_result["decision"] != "[No Support]" and web_result.get("answer"):
-                return web_result
-            decision = "[No Support]"
-            answer = "Nao encontrei informacao suficiente nos documentos disponiveis."
+        answer = self._extract_by_intent(intent, query, relevant_chunks, analysis)
+        if not answer and diversified:
+            answer = self._extract_by_intent(intent, query, diversified[:3], analysis)
+        if not answer:
+            answer = self._fallback_fulltext_answer(query, intent)
 
-        result = self._build_response(
-            query, relevant_chunks, diversified, answer,
-            self._get_main_source(diversified), confidence, decision
-        )
+        if answer:
+            decision = "[Supported]" if confidence >= 0.45 else "[Partially]"
+            result = self._build_response(query, relevant_chunks, diversified, answer, self._get_main_source(diversified), confidence, decision, self.available_sections)
+            self._cached_ask[cache_key] = result
+            return result
+
+        web_result = self._web_fallback(query)
+        if web_result["decision"] != "[No Support]" and web_result.get("answer"):
+            return web_result
+
+        sections = self.available_sections
+        msg = "Nao encontrei informacao suficiente."
+        if sections:
+            msg += f" Documento possui secoes: {', '.join(sections)}. Tente perguntar de forma mais especifica."
+        result = self._build_response(query, [], [], msg, "", 0, "[No Support]", sections)
         self._cached_ask[cache_key] = result
         return result
 
-    def _filter_schema_chunks(self, chunks: List[Tuple]) -> List[Tuple]:
-        filtered = []
-        for c in chunks:
-            source = c[3] if len(c) > 3 else ""
-            text = c[2] if len(c) > 2 else ""
-            if source.startswith("sql_schema:"):
+    def _find_table_chunks(self) -> List[Tuple]:
+        results = []
+        seen = set()
+        for i, c in enumerate(self.dense.chunks):
+            if c.get("tag") == "table":
+                uid = id(c["text"])
+                if uid not in seen:
+                    seen.add(uid)
+                    chunk_text = c["text"]
+                    chunk_source = c.get("source", "unknown")
+                    results.append((i, 1.0, chunk_text, chunk_source))
+        return results
+
+    def _fallback_fulltext(self, query: str, intent: str) -> Dict:
+        answer = self._fallback_fulltext_answer(query, intent)
+        if answer:
+            return self._build_response(query, [], [], answer, "full_text", 0.40, "[Partially]", self.available_sections)
+        sections = self.available_sections
+        msg = "Nao encontrei informacao suficiente nos documentos."
+        if sections:
+            msg += f" Seccoes disponiveis: {', '.join(sections)}"
+        return self._build_response(query, [], [], msg, "", 0, "[No Support]", sections)
+
+    def _fallback_fulltext_answer(self, query: str, intent: str) -> str:
+        if not self.full_docs:
+            return ""
+        query_lower = query.lower()
+        words = [w for w in re.findall(r'[a-zA-Z0-9\u00C0-\u00FF]+', query_lower) if len(w) > 2]
+        if not words:
+            return ""
+
+        best_score = 0
+        best_para = ""
+        best_section = ""
+
+        for source, doc_text in self.full_docs.items():
+            paragraphs = re.split(r'\n\s*\n', doc_text)
+            for para in paragraphs:
+                para_lower = para.lower()
+                score = sum(1 for w in words if w in para_lower)
+                if score > best_score:
+                    best_score = score
+                    best_para = para.strip()
+                    best_section = source
+
+        if best_para:
+            lines = [l.strip() for l in best_para.split("\n") if l.strip()]
+            if intent in ("list", "count"):
+                data_lines = [l for l in lines if not re.match(r'^[A-Z\s]{3,}$', l) and len(l) > 10]
+                if data_lines:
+                    return "\n".join(data_lines[:10])
+            return best_para[:500]
+        return ""
+
+    def _analyze_query(self, query: str) -> Dict:
+        query_lower = query.lower()
+        intent = "general"
+        entities = []
+
+        list_words = ["lista", "liste", "listar", "quais", "quais sao", "enumere", "mostre",
+                      "itens", "produtos", "relacao", "todos"]
+        if any(w in query_lower for w in list_words):
+            intent = "list"
+
+        count_words = ["quantos", "quantas", "total de", "numero de", "conta", "contagem"]
+        if any(w in query_lower for w in count_words):
+            intent = "count"
+
+        value_words = ["qual", "quanto", "quanto custa", "valor", "preco", "total",
+                       "saldo", "custou", "custa"]
+        if any(w in query_lower for w in value_words):
+            if intent == "general":
+                intent = "value"
+
+        entity_words = ["destinatario", "emitente", "remetente", "cliente",
+                        "fornecedor", "transportadora", "vendedor", "produto"]
+        for w in entity_words:
+            if w in query_lower:
+                entities.append(w)
+                if intent == "general":
+                    intent = "entity"
+
+        for word in re.findall(r'[a-zA-Z0-9\u00C0-\u00FF]+', query_lower):
+            if len(word) > 3:
+                entities.append(word)
+
+        return {"intent": intent, "entities": list(set(entities)), "original": query}
+
+    def _extract_by_intent(self, intent: str, query: str, chunks: List[Tuple], analysis: Dict) -> str:
+        if not chunks:
+            return ""
+        if intent == "list":
+            return self._extract_list(query, chunks)
+        elif intent == "count":
+            return self._extract_count(query, chunks)
+        elif intent == "value":
+            return self._extract_value(query, chunks)
+        elif intent == "entity":
+            return self._extract_entity(query, chunks, analysis.get("entities", []))
+        else:
+            return self._extract_answer(query, chunks)
+
+    def _extract_list(self, query: str, chunks: List[Tuple]) -> str:
+        table_lines = []
+        seen = set()
+        for _, _, text, _ in chunks:
+            lines = text.split("\n")
+            for line in lines:
+                line = line.strip()
+                if not line or len(line) < 5:
+                    continue
+                if re.match(r'^[A-Z\s]{5,}$', line):
+                    continue
+                if re.search(r'\d+', line) and not re.match(r'^(?:nota|fiscal|cnpj|inscricao)', line, re.IGNORECASE):
+                    key = line[:60].lower()
+                    if key not in seen:
+                        seen.add(key)
+                        table_lines.append(line)
+
+        if table_lines:
+            formatted = []
+            for line in table_lines[:15]:
+                if "  " in line:
+                    parts = re.split(r'\s{2,}', line)
+                    formatted.append(" - ".join(p.strip() for p in parts if p.strip()))
+                else:
+                    formatted.append(line)
+            return "\n".join(formatted)
+
+        all_text = "\n".join(t for _, _, t, _ in chunks)
+        raw_lines = [l.strip() for l in all_text.split("\n") if l.strip() and len(l.strip()) > 5]
+        seen2 = set()
+        items = []
+        for line in raw_lines:
+            if re.match(r'^[A-Z\s]{5,}$', line):
                 continue
-            if source.startswith("sql_query:"):
+            if re.search(r'\d+', line):
+                key = line[:50].lower()
+                if key not in seen2:
+                    seen2.add(key)
+                    items.append(line)
+        return "\n".join(items[:15]) if items else ""
+
+    def _extract_count(self, query: str, chunks: List[Tuple]) -> str:
+        all_text = "\n".join(t for _, _, t, _ in chunks)
+        lines = [l.strip() for l in all_text.split("\n") if l.strip()]
+        item_lines = [l for l in lines if re.search(r'\d+', l) and not re.match(r'^(?:nota|cnpj|inscricao)', l, re.IGNORECASE)]
+        count = len(item_lines)
+        if count > 0:
+            return f"Total de {count} itens encontrados."
+        return ""
+
+    def _extract_value(self, query: str, chunks: List[Tuple]) -> str:
+        all_text = "\n".join(t for _, _, t, _ in chunks)
+
+        money_values = re.findall(r'[Rr]\$\s*[\d,.]+', all_text)
+        number_values = re.findall(r'\b\d{1,3}(?:\.\d{3})*(?:,\d{2})?\b', all_text)
+
+        query_lower = query.lower()
+        keywords = [w for w in re.findall(r'[a-zA-Z]+', query_lower) if len(w) > 2]
+        total_keywords = any(k in query_lower for k in ["total", "valor", "montante", "soma"])
+
+        if total_keywords and len(money_values) >= 2:
+            return f"Valores encontrados: {', '.join(money_values)}"
+
+        relevant_sentences = []
+        for _, _, text, _ in chunks:
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                has_money = bool(re.search(r'[Rr]\$', line))
+                has_number = bool(re.search(r'\d+', line))
+                if has_money:
+                    match_score = sum(1 for k in keywords if k in line.lower())
+                    if match_score > 0 or len(keywords) == 0:
+                        relevant_sentences.append(line)
+
+        if relevant_sentences:
+            return "\n".join(relevant_sentences[:5])
+
+        for _, _, text, _ in chunks:
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                match_score = sum(1 for k in keywords if k in line.lower())
+                if match_score >= 2:
+                    relevant_sentences.append(line)
+        if relevant_sentences:
+            return "\n".join(relevant_sentences[:3])
+        return ""
+
+    def _extract_entity(self, query: str, chunks: List[Tuple], entities: List[str]) -> str:
+        entity = entities[0].lower() if entities else ""
+        relevant = []
+        field_pattern = re.compile(rf'{{entity}}[\s:]*', re.IGNORECASE) if entity else None
+        for _, _, text, _ in chunks:
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                if entity and entity in line.lower():
+                    relevant.append(line)
+                    continue
+                if re.match(r'^(?:razao\s*social|cnpj|cpf|endereco|inscricao|nome|fantasia)', line, re.IGNORECASE):
+                    relevant.append(line)
+        if relevant:
+            seen_key = set()
+            unique = []
+            for line in relevant:
+                key = line[:40].lower()
+                if key not in seen_key:
+                    seen_key.add(key)
+                    unique.append(line)
+            return "\n".join(unique[:8])
+        return ""
+
+    def _extract_answer(self, query: str, chunks: List[Tuple]) -> str:
+        if not chunks:
+            return ""
+        query_words = set(re.findall(r'[A-Za-z0-9\u00C0-\u00FF]+', query.lower()))
+        query_numbers = set(re.findall(r'\d+', query))
+
+        def score_line(line: str) -> float:
+            lower = line.lower()
+            word_matches = sum(1 for w in query_words if len(w) > 2 and w in lower)
+            num_matches = sum(1 for n in query_numbers if n in line)
+            word_score = word_matches / max(len(query_words), 1)
+            num_score = min(num_matches / max(len(query_numbers), 1), 1.0)
+            return 0.5 * word_score + 0.5 * num_score
+
+        seen = set()
+        scored_lines = []
+        for _, _, text, _ in chunks:
+            for line in text.replace("\r", "").split("\n"):
+                line = line.strip()
+                if not line or len(line) < 8:
+                    continue
+                if re.match(r'^[A-Z\s]{5,}$', line):
+                    continue
+                key = line[:40].lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                s = score_line(line)
+                if s > 0:
+                    scored_lines.append((s, line))
+
+        scored_lines.sort(key=lambda x: x[1], reverse=True)
+        best_lines = [l for _, l in scored_lines[:3]]
+        return "\n".join(best_lines) if best_lines else (chunks[0][2][:300] if chunks else "")
+
+    def _evaluate_chunks(self, query: str, chunks: List[Tuple]) -> Tuple[List[Tuple], float]:
+        if not chunks:
+            return [], 0.0
+        rerank_scores = np.array([s[1] for s in chunks])
+        min_s, max_s = rerank_scores.min(), rerank_scores.max()
+        if max_s > min_s:
+            rerank_norm = (rerank_scores - min_s) / (max_s - min_s)
+        else:
+            rerank_norm = np.full_like(rerank_scores, 0.5)
+        query_vec = self.embedder.encode_query(query)
+        relevant = []
+        scores = []
+        for i, (doc_id, _, text, source) in enumerate(chunks):
+            if source.startswith("sql_schema:") or source.startswith("sql_query:"):
                 continue
-            field_like = re.findall(r'^[a-z_]+\d*:\s', text.strip()[:40])
-            if field_like and len(field_like) >= 3:
-                continue
-            colon_count = text.count(":")
-            total_lines = text.count("\n") + 1
-            if colon_count > 30 and total_lines < colon_count / 2:
-                continue
-            filtered.append(c)
-        if not filtered and chunks:
-            filtered = [c for c in chunks if not c[3].startswith("sql_")]
-        if not filtered:
-            filtered = chunks[:3]
-        return filtered
+            doc_vec = self.embedder.encode_query(text[:512])
+            sim = float(np.dot(query_vec, doc_vec))
+            sim_norm = max(0.0, (sim + 1.0) / 2.0)
+            combined = 0.6 * rerank_norm[i] + 0.4 * sim_norm
+            relevant.append((doc_id, combined, text, source))
+            scores.append(combined)
+        if not relevant and chunks:
+            for i, (doc_id, _, text, source) in enumerate(chunks):
+                if not source.startswith("sql_"):
+                    relevant.append((doc_id, 0.15, text, source))
+                    scores.append(0.15)
+                    if len(relevant) >= 3:
+                        break
+        confidence = float(np.mean(scores)) if scores else 0.0
+        relevant.sort(key=lambda x: x[1], reverse=True)
+        return relevant[:5], confidence
+
+    def connect_sqlite(self, db_path: str) -> str:
+        return self.sql.connect_sqlite(db_path)
+
+    def connect_firebird(self, db_path: str, host: str = "localhost",
+                         user: str = "SYSDBA", password: str = "masterkey") -> str:
+        return self.sql.connect_firebird(db_path, user=user, password=password, host=host)
+
+    def connect_mysql(self, host: str, port: int, user: str, password: str, database: str) -> str:
+        return self.sql.connect_mysql(host, port, user, password, database)
+
+    def query_sql(self, conn_name: str, sql: str) -> str:
+        return self.sql.query_to_text(conn_name, sql)
 
     def _try_sql_query(self, query: str) -> Optional[Dict]:
         db_names = self.sql.list_databases()
@@ -220,10 +527,8 @@ class OracleEngine:
         schema = self.sql.schemas.get(db_name, [])
         if not schema:
             return None
-
         tables = [t for t in schema if not t["table"].startswith("ECO$")]
         query_lower = query.lower()
-
         table_scores = []
         for t in tables:
             name = t["table"].lower()
@@ -238,18 +543,14 @@ class OracleEngine:
                     score += 5
             if score > 0:
                 table_scores.append((t, score))
-
         table_scores.sort(key=lambda x: x[1], reverse=True)
         if not table_scores:
             return None
-
         best_table = table_scores[0][0]
         table_name = best_table["table"]
         columns = best_table["columns"]
-
         where_clauses = []
         search_terms = [w for w in re.findall(r'[a-z0-9]+', query_lower) if len(w) > 3]
-
         for term in search_terms:
             relevant_cols = [c for c in columns if any(k in c.lower() for k in
                             ["descricao", "nome", "fantasia", "produto", "titulo",
@@ -257,47 +558,37 @@ class OracleEngine:
             if relevant_cols:
                 col = relevant_cols[0]
                 where_clauses.append(f"UPPER({col}) LIKE UPPER('%{term}%')")
-
         numbers = re.findall(r'\d+', query)
         num_cols = [c for c in columns if any(k in c.lower() for k in
                    ["codigo", "numero", "id", "gid", "pedido", "nota", "documento"])]
         if numbers and num_cols:
             where_clauses.append(f"{num_cols[0]} = {numbers[0]}")
-
-        aggregate = ""
         if any(w in query_lower for w in ["quantos", "quantas", "total de", "numero de", "conta"]):
-            if "COUNT" not in aggregate and "quant" in query_lower:
-                aggregate = "COUNT(*)"
+            aggregate = "COUNT(*)"
         else:
             limit_cols = [c for c in [c for c in columns if c.lower() not in
                          ["senha", "password", "hash", "token", "foto", "imagem", "logotipo"]][:8]]
             aggregate = ", ".join(limit_cols) if limit_cols else "*"
-
         if aggregate == "COUNT(*)":
             sql = f"SELECT COUNT(*) AS total FROM {table_name}"
         else:
             sql = f"SELECT {aggregate} FROM {table_name}"
-
         if where_clauses:
             sql += " WHERE " + " OR ".join(where_clauses[:3])
-
         if aggregate != "COUNT(*)":
             sql += " FETCH FIRST 10 ROWS ONLY"
-
         try:
             rows = self.sql.execute_query(db_name, sql)
-        except Exception as e:
+        except Exception:
             try:
                 sql_simple = f"SELECT COUNT(*) AS total FROM {table_name}"
                 rows = self.sql.execute_query(db_name, sql_simple)
             except Exception:
                 return None
-
         if not rows:
             return {"query": query, "answer": "Nenhum resultado encontrado no banco.",
                     "confidence": 0.0, "decision": "[Partially]", "source": db_name,
                     "chunks": [{"text": sql, "score": 1.0, "source": db_name}]}
-
         formatted = self._format_sql_result(rows, sql, table_name, query)
         return {"query": query, "answer": formatted, "confidence": 0.85,
                 "decision": "[Supported]", "source": f"sql:{table_name}",
@@ -309,8 +600,7 @@ class OracleEngine:
         if len(rows) == 1 and "total" in rows[0] and "COUNT" in sql:
             count = rows[0]["total"]
             table_pt = table.replace("trec", "").replace("tspd", "").replace("ger", "")
-            return f"Total encontrado: {count} registro(s) na tabela {table_pt}."
-
+            return f"Total: {count} registro(s) em {table_pt}."
         lines = []
         for row in rows[:8]:
             parts = []
@@ -324,116 +614,9 @@ class OracleEngine:
                 parts.append(f"{k_clean}: {val_str}")
             if parts:
                 lines.append(" | ".join(parts))
-
         if len(rows) > 8:
             lines.append(f"... e mais {len(rows) - 8} registro(s)")
-
         return "\n".join(lines) if lines else str(rows[0])
-
-    def _analyze_query(self, query: str) -> Dict:
-        query_lower = query.lower()
-        intent = "fact"
-        if any(w in query_lower for w in ["qual", "quais", "quanto", "valor", "numero", "codigo"]):
-            intent = "value"
-        elif any(w in query_lower for w in ["como", "procedimento", "passo", "etapa"]):
-            intent = "procedure"
-        elif any(w in query_lower for w in ["lista", "quais sao", "liste", "enumere", "mostre"]):
-            intent = "list"
-        elif any(w in query_lower for w in ["diferenca", "comparar", "vs", "versus"]):
-            intent = "comparison"
-        return {"intent": intent, "entities": [], "original": query}
-
-    def _decide_retrieve(self, analysis: Dict) -> str:
-        return "[Retrieve]"
-
-    def _evaluate_chunks(self, query: str, chunks: List[Tuple]) -> Tuple[List[Tuple], float]:
-        if not chunks:
-            return [], 0.0
-
-        rerank_scores = np.array([s[1] for s in chunks])
-        min_s, max_s = rerank_scores.min(), rerank_scores.max()
-        if max_s > min_s:
-            rerank_norm = (rerank_scores - min_s) / (max_s - min_s)
-        else:
-            rerank_norm = np.full_like(rerank_scores, 0.5)
-
-        query_vec = self.embedder.encode_query(query)
-        relevant = []
-        scores = []
-        for i, (doc_id, _, text, source) in enumerate(chunks):
-            if source.startswith("sql_schema:") or source.startswith("sql_query:"):
-                continue
-            doc_vec = self.embedder.encode_query(text[:512])
-            sim = float(np.dot(query_vec, doc_vec))
-            sim_norm = max(0.0, (sim + 1.0) / 2.0)
-            combined = 0.6 * rerank_norm[i] + 0.4 * sim_norm
-            relevant.append((doc_id, combined, text, source))
-            scores.append(combined)
-
-        if not relevant and chunks:
-            for i, (doc_id, _, text, source) in enumerate(chunks):
-                if not source.startswith("sql_"):
-                    relevant.append((doc_id, 0.15, text, source))
-                    scores.append(0.15)
-                    if len(relevant) >= 3:
-                        break
-
-        confidence = float(np.mean(scores)) if scores else 0.0
-        relevant.sort(key=lambda x: x[1], reverse=True)
-        return relevant[:5], confidence
-
-    def _extract_answer(self, query: str, chunks: List[Tuple]) -> str:
-        if not chunks:
-            return ""
-        query_words = set(re.findall(r'[A-Za-z0-9À-ÿ]+', query.lower()))
-        query_numbers = set(re.findall(r'\d+', query))
-
-        def score_sentence(sent: str) -> float:
-            sent_lower = sent.lower()
-            word_matches = sum(1 for w in query_words if len(w) > 2 and w in sent_lower)
-            num_matches = sum(1 for n in query_numbers if n in sent)
-            word_score = word_matches / max(len(query_words), 1)
-            num_score = min(num_matches / max(len(query_numbers), 1), 1.0)
-            return 0.5 * word_score + 0.5 * num_score
-
-        all_sentences = []
-        for c in chunks:
-            text = c[2]
-            raw_sents = re.split(r'(?<=[.!?\n])\s*', text)
-            for s in raw_sents:
-                s = s.strip()
-                if s and len(s) > 15 and ":" not in s[:5]:
-                    all_sentences.append((s, score_sentence(s)))
-
-        all_sentences.sort(key=lambda x: x[1], reverse=True)
-        best = [s[0] for s in all_sentences[:4] if s[1] > 0]
-
-        if best:
-            seen = set()
-            unique = []
-            for s in best:
-                key = s[:50].lower()
-                if key not in seen:
-                    seen.add(key)
-                    unique.append(s)
-            return "\n".join(unique[:2])
-        return chunks[0][2][:300]
-
-    def connect_sqlite(self, db_path: str) -> str:
-        name = self.sql.connect_sqlite(db_path)
-        return name
-
-    def connect_firebird(self, db_path: str, host: str = "localhost",
-                         user: str = "SYSDBA", password: str = "masterkey") -> str:
-        name = self.sql.connect_firebird(db_path, user=user, password=password, host=host)
-        return name
-
-    def connect_mysql(self, host: str, port: int, user: str, password: str, database: str) -> str:
-        name = self.sql.connect_mysql(host, port, user, password, database)
-        return name
-
-    def query_sql(self, conn_name: str, sql: str) -> str:
-        return self.sql.query_to_text(conn_name, sql)
 
     def _web_fallback(self, query: str) -> Dict:
         if not self.config.web_fallback_enabled:
@@ -467,7 +650,8 @@ class OracleEngine:
 
     def _build_response(self, query: str, relevant_chunks: List[Tuple],
                         all_chunks: List[Tuple], answer: str,
-                        source: str, confidence: float, decision: str) -> Dict:
+                        source: str, confidence: float, decision: str,
+                        sections: Optional[List[str]] = None) -> Dict:
         return {
             "query": query,
             "answer": answer,
@@ -475,6 +659,7 @@ class OracleEngine:
             "decision": decision,
             "source": source,
             "num_chunks": len(relevant_chunks),
+            "sections": sections or [],
             "chunks": [
                 {"text": c[2][:300], "score": round(c[1], 3), "source": c[3]}
                 for c in relevant_chunks[:3]

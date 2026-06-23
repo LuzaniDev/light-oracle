@@ -69,12 +69,16 @@ class BM25Index:
 
         strategies = [
             self._sanitize_query(query),
-            self._sanitize_query(query.replace("?", "").replace("!", "").replace(",", "")),
+            self._sanitize_query(self._strip_punctuation(query)),
         ]
 
-        key_words = [w for w in query.split() if len(w) > 3]
-        if key_words:
-            strategies.append(" OR ".join(f'"{w}"' for w in key_words[:5]))
+        key_terms = [w for w in self._extract_terms(query) if len(w) > 2]
+        if key_terms:
+            strategies.append(" OR ".join(f'"{w}"' for w in key_terms[:8]))
+
+        short_terms = [w for w in self._extract_terms(query) if len(w) >= 2]
+        if short_terms:
+            strategies.append(" OR ".join(f'"{w}"' for w in short_terms[:12]))
 
         for sanitized in strategies:
             if not sanitized:
@@ -97,18 +101,55 @@ class BM25Index:
             except sqlite3.OperationalError:
                 continue
 
+        if not results:
+            latest = self._get_latest_chunks(top_k)
+            results.extend(latest)
+
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:top_k]
 
-    def _sanitize_query(self, query: str) -> str:
+    def _extract_terms(self, text: str) -> List[str]:
         import re
         terms = []
-        tokens = re.findall(r'[A-Za-zÀ-ÿ0-9]+', query)
-        for word in tokens:
-            word = word.strip('"\'(),.;:!?')
+        for token in re.findall(r'[A-Za-z0-9\u00C0-\u00FF#]+', text):
+            token = token.strip('"\'(),.;:!?')
+            if token.startswith('#') and len(token) > 1:
+                terms.append(token[1:])
+                terms.append(token)
+            elif re.match(r'[Rr]\$', token):
+                pass
+            elif re.match(r'^\d+[\d.,]*$', token):
+                clean = token.replace('.', '').replace(',', '.')
+                terms.append(clean)
+                terms.append(token)
+            elif len(token) >= 2:
+                terms.append(token)
+        return terms
+
+    def _strip_punctuation(self, text: str) -> str:
+        import re
+        return re.sub(r'[^\w\s\u00C0-\u00FF]', ' ', text)
+
+    def _sanitize_query(self, query: str) -> str:
+        terms = []
+        for word in self._extract_terms(query):
             if len(word) >= 2:
                 terms.append(f'"{word}"')
         return " OR ".join(terms) if terms else ""
+
+    def _get_latest_chunks(self, top_k: int) -> List[Tuple[int, float, str, str]]:
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT d.id, d.text, d.source FROM documents d
+                ORDER BY d.id DESC LIMIT ?
+            """, (top_k,))
+            results = []
+            for rowid, text, source in cursor.fetchall():
+                results.append((rowid, 0.01, text, source))
+            return results
+        except Exception:
+            return []
 
     def get_document_count(self) -> int:
         self.connect()
