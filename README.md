@@ -42,37 +42,38 @@ cd ../..
 
 ## Configuracao
 
-Copie `.env.example` para `.env` e ajuste as variaveis conforme necessario:
+Crie um arquivo `.env` na raiz do projeto com as configuracoes desejadas:
 
-```bash
-cp .env.example .env
+```ini
+# Oracle RAG - Configuracao local
+# Descomente e ajuste conforme necessario
+
+# ORACLE_BASE_DIR=%TEMP%/oracle-rag
+# ORACLE_EMBED_MODEL=BAAI/bge-small-en-v1.5
+# ORACLE_EMBED_DIM=256
+# ORACLE_EMBED_BATCH=32
+# ORACLE_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-2-v2
+# ORACLE_CHUNK_SIZE=512
+# ORACLE_CHUNK_OVERLAP=64
+# ORACLE_BM25_TOP_K=50
+# ORACLE_DENSE_TOP_K=50
+# ORACLE_RRF_TOP_K=30
+# ORACLE_CONFIDENCE_HIGH=0.60
+# ORACLE_CONFIDENCE_MEDIUM=0.40
+# ORACLE_WEB_FALLBACK=true
+# ORACLE_WEB_MAX_RESULTS=5
+# ORACLE_WEB_PORT=8081
+# ORACLE_WEB_HOST=127.0.0.1
+# ORACLE_FB_HOST=localhost
+# ORACLE_FB_USER=SYSDBA
+# ORACLE_FB_PASSWORD=masterkey
 ```
 
-### Variaveis disponiveis
+Ou copie o arquivo de exemplo:
 
-| Variavel | Default | Descricao |
-|---|---|---|
-| `ORACLE_BASE_DIR` | `%TEMP%/oracle-rag` | Diretorio para indices, uploads e cache |
-| `ORACLE_EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Modelo de embedding |
-| `ORACLE_EMBED_DIM` | `256` | Dimensao do embedding |
-| `ORACLE_EMBED_BATCH` | `32` | Batch do embedding |
-| `ORACLE_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-2-v2` | Modelo cross-encoder |
-| `ORACLE_CHUNK_SIZE` | `512` | Tamanho do chunk em palavras |
-| `ORACLE_CHUNK_OVERLAP` | `64` | Sobreposicao entre chunks |
-| `ORACLE_BM25_TOP_K` | `50` | Resultados do BM25 |
-| `ORACLE_DENSE_TOP_K` | `50` | Resultados da busca densa |
-| `ORACLE_RRF_TOP_K` | `30` | Resultados apos fusao |
-| `ORACLE_CONFIDENCE_HIGH` | `0.60` | Threshold para "Suportado" |
-| `ORACLE_CONFIDENCE_MEDIUM` | `0.40` | Threshold para "Parcial" |
-| `ORACLE_WEB_FALLBACK` | `true` | Ativar busca na web |
-| `ORACLE_WEB_MAX_RESULTS` | `5` | Maximo de resultados web |
-| `ORACLE_WEB_PORT` | `8081` | Porta do servidor web |
-| `ORACLE_WEB_HOST` | `127.0.0.1` | Host do servidor web |
-| `ORACLE_FB_HOST` | `localhost` | Host Firebird |
-| `ORACLE_FB_USER` | `SYSDBA` | Usuario Firebird |
-| `ORACLE_FB_PASSWORD` | `masterkey` | Senha Firebird |
-
-Ou defina como variaveis de ambiente diretamente.
+```bash
+copy .env.example .env
+```
 
 ## Uso
 

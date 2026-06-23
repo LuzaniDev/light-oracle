@@ -12,3 +12,4 @@ web/frontend/dist/
 web/frontend/node_modules/
 *.vsix
 *.log
+.env
