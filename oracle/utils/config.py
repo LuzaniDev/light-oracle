@@ -71,6 +71,10 @@ class OracleConfig:
     faiss_pq_m: int = 8
     faiss_pq_bits: int = 8
 
+    # Web Fallback
+    web_max_results: int = 5
+    web_fallback_enabled: bool = True
+
     # Cache
     cache_size: int = 100
 

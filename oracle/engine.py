@@ -7,7 +7,9 @@ from .retrieval.dense import DenseIndex
 from .retrieval.hyde import HyDEGenerator
 from .retrieval.multi_query import MultiQueryGenerator
 from .retrieval.hybrid import HybridFusion, MMR
+from .retrieval.web_fallback import WebFallback
 from .pipeline.chunker import Chunker
+from .pipeline.sql_connector import SQLConnector
 from .utils.config import OracleConfig
 
 
@@ -33,6 +35,9 @@ class OracleEngine:
             chunk_size=self.config.chunk_size,
             chunk_overlap=self.config.chunk_overlap,
         )
+        self.web = WebFallback(max_results=self.config.web_max_results)
+        self.sql = SQLConnector()
+        self.sql_sources: Dict[str, str] = {}
         self._load_existing()
 
     def _load_existing(self):
@@ -108,6 +113,9 @@ class OracleEngine:
                 if rewritten != query:
                     return self.ask(rewritten)
         else:
+            web_result = self._web_fallback(query)
+            if web_result["decision"] != "[No Support]" and web_result.get("answer"):
+                return web_result
             decision = "[No Support]"
             answer = "Não encontrei informação suficiente nos documentos disponíveis."
 
@@ -196,6 +204,45 @@ class OracleEngine:
                     unique.append(s)
             return "\n".join(unique[:2])
         return chunks[0][2][:300]
+
+    def connect_sqlite(self, db_path: str) -> str:
+        name = self.sql.connect_sqlite(db_path)
+        schema_text = self.sql.get_schema_text(name)
+        self.index_document(schema_text, source=f"sql_schema:{name}")
+        return name
+
+    def connect_mysql(self, host: str, port: int, user: str, password: str, database: str) -> str:
+        name = self.sql.connect_mysql(host, port, user, password, database)
+        schema_text = self.sql.get_schema_text(name)
+        self.index_document(schema_text, source=f"sql_schema:{name}")
+        return name
+
+    def query_sql(self, conn_name: str, sql: str) -> str:
+        text = self.sql.query_to_text(conn_name, sql)
+        self.index_document(text, source=f"sql_query:{conn_name}")
+        return text
+
+    def _web_fallback(self, query: str) -> Dict:
+        if not self.config.web_fallback_enabled:
+            return {"query": query, "answer": "", "decision": "[No Support]", "confidence": 0.0, "source": "web"}
+        results = self.web.search_and_fetch(query)
+        if not results:
+            return {"query": query, "answer": "", "decision": "[No Support]", "confidence": 0.0, "source": "web"}
+        chunks = []
+        for i, r in enumerate(results):
+            content = r.get("content", "") or r.get("snippet", "")
+            if content:
+                chunks.append({"id": i, "text": content, "source": r.get("url", f"web_{i}"), "tokens": len(content.split())})
+                self.bm25.add_documents([chunks[-1]])
+                self.dense.add_chunks([chunks[-1]])
+        if not chunks:
+            return {"query": query, "answer": "", "decision": "[No Support]", "confidence": 0.0, "source": "web"}
+        response = self.ask(query)
+        if response["confidence"] < 0.3:
+            best = max(chunks, key=lambda c: len(c["text"]))
+            return {"query": query, "answer": best["text"][:500], "decision": "[Partially]",
+                    "confidence": 0.35, "source": results[0].get("url", "web"), "mode": "web_fallback"}
+        return response
 
     def _rewrite_query(self, query: str) -> str:
         return query

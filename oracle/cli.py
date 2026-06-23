@@ -15,7 +15,8 @@ from .pipeline.persistent import PersistentPipeline
 
 app = typer.Typer(
     name="oracle",
-    help="Light Oracle RAG — Oráculo RAG leve para CPU",
+    help=    "Light Oracle RAG — Oráculo RAG leve para CPU",
+    no_args_is_help=True,
 )
 console = Console()
 
@@ -102,7 +103,7 @@ def stats(
 def interactive():
     live, persistent, engine = get_pipelines()
     console.print("[bold cyan]Oráculo RAG — Modo Interativo[/bold cyan]")
-    console.print("Comandos: /file <caminho> | /index <caminho> | /stats | /clear | /exit")
+    console.print("Comandos: /file <caminho> | /index <caminho> | /sql <banco> [consulta] | /web <pergunta> | /stats | /clear | /exit")
     current_file = None
 
     while True:
@@ -135,6 +136,27 @@ def interactive():
             elif cmd[0] == "stats":
                 s = persistent.stats()
                 console.print(f"Documentos: {s['documentos_indexados']}, Denso: {s['indice_denso_carregado']}")
+            elif cmd[0] == "web":
+                web_query = " ".join(cmd[1:])
+                if web_query:
+                    result = engine._web_fallback(web_query)
+                    _print_result(result)
+                else:
+                    console.print("[yellow]Uso: /web <pergunta>[/yellow]")
+            elif cmd[0] == "sql":
+                if len(cmd) >= 2:
+                    sql_path = cmd[1]
+                    if os.path.exists(sql_path):
+                        conn_name = engine.connect_sqlite(sql_path)
+                        console.print(f"[green]Conectado a:[/green] {os.path.basename(sql_path)}")
+                        if len(cmd) >= 3:
+                            sql_query = " ".join(cmd[2:])
+                            result = engine.query_sql(conn_name, sql_query)
+                            console.print(result[:1000])
+                    else:
+                        console.print(f"[red]Banco não encontrado:[/red] {sql_path}")
+                else:
+                    console.print("[yellow]Uso: /sql <caminho> [consulta][/yellow]")
             elif cmd[0] == "clear":
                 os.system("cls" if os.name == "nt" else "clear")
             continue
@@ -144,6 +166,36 @@ def interactive():
         else:
             result = persistent.ask(query)
 
+        _print_result(result)
+
+
+@app.command()
+def sql(
+    db: str = typer.Argument(..., help="Caminho do banco SQLite"),
+    query: str = typer.Argument(None, help="Consulta SQL opcional"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Saída em JSON"),
+):
+    live, persistent, engine = get_pipelines()
+    if not os.path.exists(db):
+        console.print(f"[red]Erro:[/red] Banco não encontrado: {db}")
+        raise typer.Exit(1)
+    conn_name = engine.connect_sqlite(db)
+    console.print(f"[green]Conectado:[/green] {os.path.basename(db)}")
+    if query:
+        text = engine.query_sql(conn_name, query)
+        console.print(text[:1000])
+
+@app.command()
+def web(
+    query: str = typer.Argument(..., help="Pergunta para busca na web"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Saída em JSON"),
+):
+    live, persistent, engine = get_pipelines()
+    console.print(f"[yellow]Buscando na web:[/yellow] {query}")
+    result = engine._web_fallback(query)
+    if json_output:
+        console.print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
         _print_result(result)
 
 
