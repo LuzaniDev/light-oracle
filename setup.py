@@ -1,0 +1,29 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="light-oracle",
+    version="0.1.0",
+    packages=find_packages(),
+    install_requires=[
+        "torch>=2.0",
+        "sentence-transformers>=3.0",
+        "faiss-cpu>=1.7",
+        "onnxruntime>=1.17",
+        "pypdfium2>=4.0",
+        "beautifulsoup4>=4.0",
+        "lxml>=4.0",
+        "pandas>=2.0",
+        "sqlite-utils>=3.0",
+        "tqdm>=4.0",
+        "colorama>=0.4",
+        "typer>=0.9",
+        "rich>=13.0",
+        "numpy>=1.24",
+    ],
+    entry_points={
+        "console_scripts": [
+            "oracle=oracle.cli:main",
+        ],
+    },
+    python_requires=">=3.10",
+)
