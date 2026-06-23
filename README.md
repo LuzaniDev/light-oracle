@@ -40,34 +40,31 @@ npm run build
 cd ../..
 ```
 
+## Demonstracao
+
+![Demo](docs/demo.gif)
+
 ## Configuracao
 
-Edite o arquivo `config.cfg` na raiz do projeto:
+Edite o arquivo `.env` na raiz do projeto:
 
 ```bash
-notepad config.cfg
+notepad .env
 ```
 
-Todas as opcoes disponiveis com documentacao completa:
+Todas as opcoes disponiveis com documentacao inline no proprio arquivo.
 
-```
-BASE_DIR         = %TEMP%/oracle-rag   # Diretorio de indices e cache
-EMBED_MODEL      = BAAI/bge-small-en-v1.5
-EMBED_DIM        = 256
-RERANKER_MODEL   = cross-encoder/ms-marco-MiniLM-L-2-v2
-CHUNK_SIZE       = 512
-CONFIDENCE_HIGH  = 0.60
-CONFIDENCE_MEDIUM = 0.40
-WEB_PORT         = 8081
-WEB_HOST         = 127.0.0.1
-WEB_FALLBACK     = true
-FB_HOST          = localhost
-FB_USER          = SYSDBA
-FB_PASSWORD      = masterkey
-```
-
-Para sobrescrever configuracoes sem modificar o arquivo principal (util em time dev):
-Crie `config.local.cfg` na mesma pasta — as chaves la sobrescrevem as do `config.cfg`.
+| Chave | Exemplo | O que faz |
+|---|---|---|
+| `ORACLE_EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Modelo de embedding |
+| `ORACLE_EMBED_DIM` | `256` | Dimensao do vetor |
+| `ORACLE_CHUNK_SIZE` | `512` | Tamanho do chunk |
+| `ORACLE_CONFIDENCE_HIGH` | `0.60` | Threshold verde |
+| `ORACLE_CONFIDENCE_MEDIUM` | `0.40` | Threshold amarelo |
+| `ORACLE_WEB_PORT` | `8081` | Porta do servidor |
+| `ORACLE_WEB_HOST` | `127.0.0.1` | Host do servidor |
+| `ORACLE_WEB_FALLBACK` | `true` | Busca na web |
+| `ORACLE_FB_HOST` | `localhost` | Firebird host |
 
 ## Uso
 
@@ -109,7 +106,7 @@ light-oracle/
 ├── web/                  # Interface web
 │   ├── server.py         # FastAPI
 │   └── frontend/         # Vue 3 + Tailwind
-├── config.cfg            # Configuracao do sistema
+├── .env                  # Configuracao do sistema
 ├── run_web.py            # Inicializador do servidor web
 ├── demo.py               # Script de demonstracao
 └── requirements.txt      # Dependencias Python
